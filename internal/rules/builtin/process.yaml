@@ -1,0 +1,103 @@
+id: deleted-running-binary
+title: "Running process whose binary was deleted from disk"
+category: process
+severity: high
+score: 70
+mitre: ["T1055", "T1620"]
+foreach: processes
+when: 'item.exe_deleted == true && !item.exe.startsWith("/memfd:")'
+evidence:
+  pid: item.pid
+  exe: item.exe
+  comm: item.comm
+dedup: ["item.pid", "item.exe"]
+---
+id: memfd-fileless-exec
+title: "Fileless execution from an anonymous memfd"
+category: process
+severity: critical
+score: 90
+mitre: ["T1620", "T1059.004"]
+foreach: processes
+when: 'item.exe_memfd == true'
+evidence:
+  pid: item.pid
+  comm: item.comm
+  cmdline: item.cmdline
+dedup: ["item.pid"]
+---
+id: exec-from-world-writable
+title: "Binary executed from a world-writable path"
+category: process
+severity: medium
+score: 50
+mitre: ["T1059"]
+foreach: processes
+when: 'item.exe.startsWith("/tmp/") || item.exe.startsWith("/dev/shm/") || item.exe.startsWith("/var/tmp/")'
+evidence:
+  pid: item.pid
+  exe: item.exe
+dedup: ["item.exe"]
+---
+id: masquerade-kernel-thread
+title: "Userland process masquerading as a kernel thread (kworker)"
+category: process
+severity: high
+score: 75
+mitre: ["T1036.004"]
+foreach: processes
+when: 'item.comm.contains("kworker") && item.exe != ""'
+evidence:
+  pid: item.pid
+  comm: item.comm
+  exe: item.exe
+dedup: ["item.pid", "item.exe"]
+---
+id: hidden-process
+title: "Process reachable via /proc/<pid> but hidden from the /proc listing (rootkit)"
+category: process
+severity: critical
+score: 95
+mitre: ["T1014"]
+foreach: hidden_pids
+when: 'item > 0'
+evidence:
+  pid: item
+dedup: ["item"]
+---
+id: process-empty-environ
+title: "Userland process with a wiped environment (anti-forensics, e.g. BPFDoor)"
+category: process
+severity: high
+score: 70
+mitre: ["T1070.004", "T1564"]
+# A real (exe-backed) process that has cleared /proc/PID/environ is anomalous;
+# BPFDoor and similar backdoors wipe it to hinder forensics. Kernel threads have
+# an empty environ legitimately but no exe, so the exe!="" guard excludes them.
+foreach: processes
+when: 'item.exe != "" && item.environ_empty == true'
+evidence:
+  pid: item.pid
+  comm: item.comm
+  exe: item.exe
+dedup: ["item.pid", "item.exe"]
+---
+id: process-reverse-shell-cmdline
+title: "Running process command line is a reverse/bind shell"
+category: execution
+severity: critical
+score: 95
+mitre: ["T1059.004"]
+# A live process whose cmdline redirects to /dev/tcp//dev/udp/<ip>, runs nc/ncat -e,
+# or calls pty.spawn() is an interactive backdoor shell. The /dev/(tcp|udp)/[0-9]
+# regex avoids matching search tools that merely carry the literal string.
+foreach: processes
+when: >
+  item.cmdline.matches("/dev/(tcp|udp)/[0-9]") ||
+  item.cmdline.contains("nc -e ") || item.cmdline.contains("ncat -e ") ||
+  item.cmdline.contains("pty.spawn(")
+evidence:
+  pid: item.pid
+  comm: item.comm
+  cmdline: item.cmdline
+dedup: ["item.pid", "item.cmdline"]

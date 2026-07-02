@@ -1,0 +1,354 @@
+id: ld-so-preload-rootkit
+title: "Entry in /etc/ld.so.preload (possible userland rootkit)"
+category: kernel
+severity: critical
+score: 90
+mitre: ["T1574.006"]
+when: 'snapshot.persistence.ld_preload.entries != null && snapshot.persistence.ld_preload.entries.size() > 0'
+evidence:
+  file: snapshot.persistence.ld_preload.ld_so_preload
+  entries: snapshot.persistence.ld_preload.entries
+---
+id: cron-download-cradle
+title: "Cron job downloads and runs code (download cradle)"
+category: persistence
+severity: high
+score: 70
+mitre: ["T1053.003", "T1059"]
+when: 'snapshot.persistence.cron != null && snapshot.persistence.cron.exists(c, c.line.contains("curl") || c.line.contains("wget"))'
+evidence:
+  matches: 'snapshot.persistence.cron.filter(c, c.line.contains("curl") || c.line.contains("wget"))'
+---
+id: cron-suspicious-command
+title: "Cron job runs an interpreter / GTFOBins shell escape"
+category: persistence
+severity: high
+score: 70
+mitre: ["T1053.003", "T1059.004"]
+when: >
+  snapshot.persistence.cron != null && snapshot.persistence.cron.exists(c,
+    c.line.contains("python -c") || c.line.contains("python3 -c") ||
+    c.line.contains("perl -e") || c.line.contains("ruby -e") ||
+    c.line.contains("bash -i") || c.line.contains("/dev/tcp") ||
+    c.line.contains("nc ") || c.line.contains("socat") ||
+    c.line.contains("base64 -d") || c.line.contains("mkfifo"))
+evidence:
+  matches: 'snapshot.persistence.cron.filter(c, c.line.contains("python -c") || c.line.contains("python3 -c") || c.line.contains("perl -e") || c.line.contains("ruby -e") || c.line.contains("bash -i") || c.line.contains("/dev/tcp") || c.line.contains("nc ") || c.line.contains("socat") || c.line.contains("base64 -d") || c.line.contains("mkfifo"))'
+---
+id: systemd-suspicious-execstart
+title: "systemd service launched from a temporary/writable path"
+category: persistence
+severity: high
+score: 75
+mitre: ["T1543.002"]
+foreach: persistence.systemd_units
+when: 'item.exec_start.startsWith("/tmp/") || item.exec_start.startsWith("/dev/shm/") || item.exec_start.startsWith("/var/tmp/") || item.exec_start.startsWith("/home/")'
+evidence:
+  name: item.name
+  exec_start: item.exec_start
+dedup: ["item.name"]
+---
+id: ssh-key-in-service-account
+title: "authorized_keys in a service (nologin) account — SSH backdoor"
+category: persistence
+severity: high
+score: 80
+mitre: ["T1098.004"]
+foreach: persistence.authorized_keys
+when: 'item.owner_nologin == true && item.keys.size() > 0'
+evidence:
+  owner: item.owner
+  path: item.path
+  key_count: item.keys.size()
+dedup: ["item.path"]
+---
+id: authorized-keys-suspicious-option
+title: "authorized_keys key with a dangerous option (environment= or command= cradle)"
+category: persistence
+severity: high
+score: 80
+mitre: ["T1098.004", "T1556"]
+foreach: persistence.authorized_keys
+when: >
+  item.keys.exists(k, k.options.contains("environment=") ||
+    (k.options.contains("command=") && (k.options.contains("/dev/tcp") ||
+     k.options.contains("nc ") || k.options.contains("bash -i") ||
+     k.options.contains("/tmp/") || k.options.contains("mkfifo"))))
+evidence:
+  path: item.path
+  owner: item.owner
+  keys: 'item.keys.filter(k, k.options.contains("environment=") || k.options.contains("command="))'
+dedup: ["item.path"]
+---
+id: sshd-backdoor-directive
+title: "sshd_config points ForceCommand/AuthorizedKeysCommand at a writable path"
+category: persistence
+severity: high
+score: 80
+mitre: ["T1098.004", "T1556"]
+when: >
+  (has(snapshot.facts.sshd_authorized_keys_command) &&
+    (string(snapshot.facts.sshd_authorized_keys_command).contains("/tmp/") ||
+     string(snapshot.facts.sshd_authorized_keys_command).contains("/dev/shm/") ||
+     string(snapshot.facts.sshd_authorized_keys_command).contains("/var/tmp/"))) ||
+  (has(snapshot.facts.sshd_force_command) &&
+    (string(snapshot.facts.sshd_force_command).contains("/tmp/") ||
+     string(snapshot.facts.sshd_force_command).contains("/dev/shm/") ||
+     string(snapshot.facts.sshd_force_command).contains("bash -i")))
+evidence:
+  force_command: snapshot.facts.sshd_force_command
+  authorized_keys_command: snapshot.facts.sshd_authorized_keys_command
+---
+id: shell-rc-backdoor
+title: "Shell startup file: alias hiding / cradle / PROMPT_COMMAND backdoor"
+category: persistence
+severity: high
+score: 70
+mitre: ["T1546.004"]
+foreach: shell_init
+when: 'item.suspicious_lines.size() > 0'
+evidence:
+  path: item.path
+  lines: item.suspicious_lines
+dedup: ["item.path"]
+---
+id: supervisor-command-writable
+title: "supervisord program launched from a writable path / shell"
+category: persistence
+severity: high
+score: 75
+mitre: ["T1543"]
+foreach: supervisor
+when: >
+  item.command.contains("/tmp/") || item.command.contains("/dev/shm/") ||
+  item.command.contains("/var/tmp/") || item.command.contains("bash -i") ||
+  item.command.contains("/dev/tcp/")
+evidence:
+  program: item.program
+  command: item.command
+  path: item.path
+dedup: ["item.path", "item.program"]
+---
+id: package-manager-hook-backdoor
+title: "Package-manager hook runs a cradle / writable-path command (apt/dpkg persistence)"
+category: persistence
+severity: high
+score: 80
+mitre: ["T1546.016"]
+# APT/DPkg Pre-Invoke/Post-Invoke/Pre-Install-Pkgs run as root on every apt/dpkg
+# run. The collector keeps only hooks whose command is a cradle or runs from a
+# writable path, so legit hooks (unattended-upgrades, command-not-found) don't FP.
+foreach: package_hooks
+when: 'item.command != ""'
+evidence:
+  path: item.path
+  directive: item.directive
+  command: item.command
+dedup: ["item.path", "item.command"]
+---
+id: modprobe-install-command
+title: "modprobe.d install/remove runs an arbitrary command (kernel-module event persistence)"
+category: persistence
+severity: high
+score: 80
+mitre: ["T1546", "T1547.006"]
+# `install <mod> <cmd>` / `remove <mod> <cmd>` in modprobe.d runs <cmd> as root
+# when the module is (un)loaded; attackers point it at a payload instead of
+# modprobe. The collector already drops /bin/true stubs and plain modprobe chains.
+foreach: modprobe_commands
+when: 'item.command != ""'
+evidence:
+  path: item.path
+  directive: item.directive
+  module: item.module
+  command: item.command
+dedup: ["item.path", "item.command"]
+---
+id: ld-so-conf-writable-path
+title: "Library search path in ld.so.conf under a writable directory (linker hijack)"
+category: evasion
+severity: high
+score: 80
+mitre: ["T1574.006"]
+# A writable dir on the system library search path lets an attacker's .so be
+# loaded into every dynamically linked binary. Collector emits only writable dirs.
+foreach: ld_so_conf
+when: 'item.dir != ""'
+evidence:
+  path: item.path
+  dir: item.dir
+dedup: ["item.dir"]
+---
+id: global-ld-preload
+title: "LD_PRELOAD/LD_AUDIT / writable LD_LIBRARY_PATH in a global environment file"
+category: evasion
+severity: critical
+score: 90
+mitre: ["T1574.006"]
+# A global LD_PRELOAD or LD_AUDIT injects a .so into every process (userland
+# rootkit, SSH-key re-adder); LD_AUDIT bypasses LD_PRELOAD-only detection.
+# Collected from /etc/environment, /etc/profile, /etc/profile.d.
+foreach: env_preload
+when: 'item.suspicious_lines.size() > 0'
+evidence:
+  path: item.path
+  lines: item.suspicious_lines
+dedup: ["item.path"]
+---
+id: systemd-exec-directive-writable
+title: "systemd ExecStartPre/Post/Reload runs from a writable path"
+category: persistence
+severity: high
+score: 75
+mitre: ["T1543.002"]
+# ExecStartPre/Post/Reload run as root around the main service but are not the
+# ExecStart, so a payload there is missed by the ExecStart check. Writable-path only.
+foreach: persistence.systemd_units
+when: >
+  item.exec_pre.contains("/tmp/") || item.exec_pre.contains("/dev/shm/") ||
+  item.exec_pre.contains("/var/tmp/") || item.exec_pre.contains("/home/")
+evidence:
+  name: item.name
+  exec_pre: item.exec_pre
+dedup: ["item.name"]
+---
+id: systemd-unit-ld-preload
+title: "systemd unit injects LD_PRELOAD/LD_AUDIT via Environment="
+category: evasion
+severity: critical
+score: 90
+mitre: ["T1574.006"]
+# A unit Environment=LD_PRELOAD=/LD_AUDIT=... loads an attacker .so into that
+# service — a per-service userland rootkit. Legit units don't set these.
+foreach: persistence.systemd_units
+when: 'item.environment.contains("LD_PRELOAD") || item.environment.contains("LD_AUDIT")'
+evidence:
+  name: item.name
+  environment: item.environment
+dedup: ["item.name"]
+---
+id: systemd-execstart-reverse-shell
+title: "systemd ExecStart contains a reverse-shell / decode cradle"
+category: persistence
+severity: critical
+score: 90
+mitre: ["T1543.002"]
+# A unit whose ExecStart embeds a reverse shell or in-line decode is a backdoor
+# service. Markers are unambiguous (never in a legit ExecStart).
+foreach: persistence.systemd_units
+when: >
+  item.exec_start.contains("/dev/tcp/") || item.exec_start.contains("bash -i") ||
+  item.exec_start.contains("sh -i") || item.exec_start.contains("mkfifo") ||
+  item.exec_start.contains("base64 -d") || item.exec_start.contains("base64 --decode")
+evidence:
+  name: item.name
+  exec_start: item.exec_start
+dedup: ["item.name"]
+---
+id: writable-persistence-file
+title: "Root-executed config file writable by a non-root user (persistence tampering)"
+category: persistence
+severity: high
+score: 80
+mitre: ["T1543", "T1053.003"]
+# A systemd unit / cron / sudoers.d / init script writable by a non-root user
+# lets that user inject commands that run as root. Collector keeps only files
+# that are other-writable or group-writable by a non-root group.
+foreach: writable_persistence
+when: 'item != ""'
+evidence:
+  path: item
+dedup: ["item"]
+---
+id: xdg-autostart-suspicious
+title: "XDG autostart entry runs a cradle / writable-path command (GUI login persistence)"
+category: persistence
+severity: high
+score: 75
+mitre: ["T1547.013"]
+# A .desktop autostart entry (/etc/xdg/autostart or ~/.config/autostart) runs on
+# graphical login. The collector keeps only entries whose Exec is a cradle or runs
+# from a writable path, so stock entries (snap userd, xdg-user-dirs) don't FP.
+foreach: xdg_autostart
+when: 'item.suspicious_lines.size() > 0'
+evidence:
+  path: item.path
+  exec: item.suspicious_lines
+dedup: ["item.path"]
+---
+id: ssh-config-localcommand
+title: "ssh client config runs a command on connect (LocalCommand / cradle ProxyCommand)"
+category: persistence
+severity: high
+score: 75
+mitre: ["T1546", "T1059.004"]
+# A LocalCommand in ssh_config runs on the client at every outbound ssh (when
+# PermitLocalCommand is on); a ProxyCommand pointing at a cradle/writable path is
+# likewise exec-on-connect. The collector keeps only these suspicious directives.
+foreach: ssh_client_commands
+when: 'item.suspicious_lines.size() > 0'
+evidence:
+  path: item.path
+  lines: item.suspicious_lines
+dedup: ["item.path"]
+---
+id: systemd-timer-suspicious
+title: "systemd timer activates a service from a writable path or a reverse shell"
+category: persistence
+severity: high
+score: 80
+mitre: ["T1053.006"]
+# A .timer is systemd's cron. The collector pairs each timer with the ExecStart of
+# the .service it activates; a timer whose target runs from /tmp,/dev/shm,/var/tmp,
+# /home or embeds a reverse-shell/decode cradle is time-triggered persistence that
+# the .service scan misses when the unit is timer-activated rather than enabled.
+foreach: systemd_timers
+when: >
+  item.exec_start != "" && (
+    item.exec_start.startsWith("/tmp/") || item.exec_start.startsWith("/dev/shm/") ||
+    item.exec_start.startsWith("/var/tmp/") || item.exec_start.startsWith("/home/") ||
+    item.exec_start.contains("/dev/tcp/") || item.exec_start.contains("bash -i") ||
+    item.exec_start.contains("sh -i") || item.exec_start.contains("mkfifo") ||
+    item.exec_start.contains("base64 -d") || item.exec_start.contains("base64 --decode")
+  )
+evidence:
+  name: item.name
+  unit: item.unit
+  schedule: item.on_calendar
+  exec_start: item.exec_start
+dedup: ["item.name"]
+---
+id: dnf-plugin-writable
+title: "dnf/yum plugin writable by a non-root user (runs as root on every transaction)"
+category: persistence
+severity: high
+score: 80
+mitre: ["T1546"]
+# A dnf/yum plugin is Python that executes as root on every package transaction.
+# A plugin file writable by a non-root user lets that user inject code that runs
+# as root the next time dnf/yum runs — a root-executed persistence vector on
+# RPM-based distros. The collector keeps only non-root-writable plugin files.
+foreach: dnf_plugins
+when: 'item.path != ""'
+evidence:
+  path: item.path
+  plugin: item.plugin
+dedup: ["item.path"]
+---
+id: grub-script-cradle
+title: "GRUB script (/etc/grub.d) contains a download cradle or reverse shell"
+category: persistence
+severity: critical
+score: 90
+mitre: ["T1542.001", "T1037"]
+# /etc/grub.d scripts run as root during every grub-mkconfig and initiate
+# boot-time execution. A download cradle or reverse shell embedded here survives
+# a reboot and runs before most defenses are loaded.
+foreach: startup_scripts
+when: >
+  item.path.startsWith("/etc/grub.d/") &&
+  item.suspicious_lines.size() > 0
+evidence:
+  path: item.path
+  lines: item.suspicious_lines
+dedup: ["item.path"]

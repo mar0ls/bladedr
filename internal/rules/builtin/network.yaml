@@ -1,0 +1,58 @@
+id: suspicious-port-listener
+title: "Listener on a port typical of a backdoor / reverse shell"
+category: network
+severity: medium
+score: 55
+mitre: ["T1571"]
+foreach: listening_sockets
+when: 'item.proto == "tcp" && (item.lport in [4444, 1337, 31337, 9001, 6666])'
+evidence:
+  port: item.lport
+  pid: item.pid
+  comm: item.comm
+dedup: ["item.lport", "item.pid"]
+---
+id: miner-c2-outbound-connection
+title: "Established connection to a known miner-pool / C2 port"
+category: network
+severity: high
+score: 75
+mitre: ["T1071", "T1496"]
+foreach: outbound_conns
+when: 'item.rport > 0'
+evidence:
+  raddr: item.raddr
+  rport: item.rport
+dedup: ["item.raddr", "item.rport"]
+---
+id: packet-sniffer-process
+title: "Process holds a raw packet socket (network sniffer / BPFDoor)"
+category: network
+severity: medium
+score: 60
+mitre: ["T1040"]
+# Excludes the usual legitimate AF_PACKET holders (DHCP/network daemons).
+foreach: processes
+when: >
+  item.packet_socket == true &&
+  !(item.comm in ["dhclient", "dhcpcd", "NetworkManager", "systemd-network", "wpa_supplicant", "avahi-daemon"])
+evidence:
+  pid: item.pid
+  comm: item.comm
+  exe: item.exe
+dedup: ["item.pid"]
+---
+id: ssh-tunnel-process
+title: "SSH client tunnel / pivot (dynamic SOCKS, remote forward, or persistent -N -f)"
+category: network
+severity: medium
+score: 60
+mitre: ["T1572", "T1090"]
+# A live ssh process doing -D (SOCKS pivot), -R (remote forward) or a persistent
+# backgrounded tunnel (-N -f) is a common lateral-movement / C2-egress channel.
+# Plain interactive -L local forwards are not flagged (too commonly legitimate).
+foreach: ssh_tunnels
+when: 'item != ""'
+evidence:
+  tunnel: item
+dedup: ["item"]

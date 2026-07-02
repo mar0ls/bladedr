@@ -1,0 +1,61 @@
+id: kernel-promiscuous-mode
+title: "Physical NIC entered promiscuous mode (possible traffic sniffing)"
+category: network
+severity: medium
+score: 55
+mitre: ["T1040"]
+# Bridge/tap/VM/CNI interfaces (Proxmox tap*/fwpr*/fwln*, vmbr*, veth*, docker0,
+# cni*, …) go promiscuous by design and are filtered out by the collector, so only
+# physical NICs in promiscuous mode (a real sniffer signal) reach this rule.
+foreach: promisc_interfaces
+when: 'item != ""'
+evidence:
+  interface: item
+dedup: ["item"]
+---
+id: kernel-exploit-segfault
+title: "Process segfault from a writable path (sign of exploitation)"
+category: process
+severity: high
+score: 70
+mitre: ["T1203", "T1068"]
+# User-space exploits (UAF/heap overflow in the Initial Access matrix) leave
+# segfaults in dmesg; a segfault of a binary from /tmp,/dev/shm,/var/tmp is highly suspicious.
+foreach: kernel_log
+when: >
+  item.message.contains("segfault") &&
+  (item.message.contains("/tmp/") || item.message.contains("/dev/shm/") || item.message.contains("/var/tmp/"))
+evidence:
+  message: item.message
+dedup: ["item.message"]
+---
+id: kernel-out-of-tree-module-load
+title: "Kernel-tainting module loaded (out-of-tree / unsigned)"
+category: kernel
+severity: high
+score: 75
+mitre: ["T1547.006"]
+# The load event (complements the per-module state rule) — many LKM rootkits.
+# Known-legit DKMS modules (ZFS/SPL, nvidia, VirtualBox, VMware, WireGuard, …) are
+# allowlisted by the collector so they don't FP on virtualization/ZFS hosts.
+foreach: out_of_tree_modules
+when: 'item != ""'
+evidence:
+  message: item
+dedup: ["item"]
+---
+id: kernel-oops-or-gpf
+title: "Kernel Oops / general protection fault / BUG (possible kernel exploit / LPE)"
+category: kernel
+severity: high
+score: 70
+mitre: ["T1068"]
+foreach: kernel_log
+when: >
+  item.message.contains("general protection fault") ||
+  item.message.contains("kernel BUG at") ||
+  item.message.startsWith("Oops") ||
+  item.message.startsWith("BUG:")
+evidence:
+  message: item.message
+dedup: ["item.message"]

@@ -1,0 +1,98 @@
+id: suid-in-writable-path
+title: "SUID binary in a writable path (/tmp, /dev/shm, /var/tmp, /dev)"
+category: privilege
+severity: high
+score: 80
+mitre: ["T1548.001"]
+foreach: suspicious_files
+when: 'item.suid == true'
+evidence:
+  path: item.path
+  mode: item.mode
+  uid: item.uid
+dedup: ["item.path"]
+---
+id: docker-socket-exposed
+title: "Docker socket world-accessible (other) — possible container escape"
+category: privilege
+severity: high
+score: 70
+mitre: ["T1610", "T1611"]
+when: 'has(snapshot.facts.docker_sock) && snapshot.facts.docker_sock == true'
+evidence:
+  note: '"docker.sock world (other)-accessible"'
+---
+id: file-capability-in-writable
+title: "File with Linux capabilities in a writable path (privilege escalation)"
+category: privilege
+severity: high
+score: 80
+mitre: ["T1548"]
+foreach: suspicious_files
+when: 'item.caps != ""'
+evidence:
+  path: item.path
+  caps: item.caps
+dedup: ["item.path"]
+---
+id: suid-shell-escape-binary
+title: "SUID bit on a shell-escape / interpreter binary (GTFOBins privesc)"
+category: privilege
+severity: high
+score: 85
+mitre: ["T1548.001"]
+# A SUID shell/interpreter/file-tool (bash, python, find, vim, cp, tar, ...) gives
+# any local user a root shell. None of these is ever legitimately SUID; standard
+# SUID binaries (sudo/su/mount/passwd/...) are excluded by the collector.
+foreach: suid_binaries
+when: 'item.path != ""'
+evidence:
+  path: item.path
+  mode: item.mode
+dedup: ["item.path"]
+---
+id: dangerous-file-capability
+title: "Binary with a privilege-escalation file capability (cap_setuid/dac_override/sys_admin/...)"
+category: privilege
+severity: high
+score: 85
+mitre: ["T1548.001"]
+# A file capability like cap_setuid/cap_dac_override/cap_sys_admin/cap_sys_ptrace/
+# cap_sys_module grants root-equivalent power without the SUID bit. Benign network
+# caps (cap_net_raw on ping) are excluded; known holders (snap-confine, newuidmap/
+# newgidmap) are allowlisted by the collector.
+foreach: dangerous_capabilities
+when: 'item.caps != ""'
+evidence:
+  path: item.path
+  caps: item.caps
+dedup: ["item.path"]
+---
+id: cron-path-hijack
+title: "Cron PATH includes a writable/relative directory (PATH interception for root jobs)"
+category: privilege
+severity: high
+score: 75
+mitre: ["T1574.007"]
+# A root cron PATH= with an empty/`.`/writable element makes bare command names in
+# cron jobs resolve from an attacker-controlled directory.
+foreach: cron_path_hijack
+when: 'item != ""'
+evidence:
+  entry: item
+dedup: ["item"]
+---
+id: writable-suid-binary
+title: "SUID/SGID binary writable by group or other (trivial privilege escalation)"
+category: privilege
+severity: critical
+score: 95
+mitre: ["T1548.001"]
+# A setuid/setgid file that any group member or anyone can overwrite is an instant
+# root (or owner) escalation. Legit SUID binaries are 04755 (not group/other-writable).
+foreach: writable_suid
+when: 'item.path != ""'
+evidence:
+  path: item.path
+  mode: item.mode
+dedup: ["item.path"]

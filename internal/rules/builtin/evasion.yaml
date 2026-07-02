@@ -1,0 +1,145 @@
+id: core-pattern-pipe-handler
+title: "core_pattern piped to a program (possible container escape / persistence)"
+category: kernel
+severity: high
+score: 75
+mitre: ["T1611", "T1547.006"]
+# An attacker sets core_pattern="|/path/to/program" to run code on a process
+# crash (e.g. container escape, EDR-T6051 / EDR-T6417). Legitimate handlers are
+# systemd-coredump and apport — we skip them.
+when: >
+  has(snapshot.facts.core_pattern) &&
+  string(snapshot.facts.core_pattern).startsWith("|") &&
+  !string(snapshot.facts.core_pattern).contains("systemd-coredump") &&
+  !string(snapshot.facts.core_pattern).contains("apport")
+evidence:
+  core_pattern: snapshot.facts.core_pattern
+---
+id: hidden-executable-in-writable
+title: "Hidden executable in a writable path (/tmp, /dev/shm, /dev)"
+category: file
+severity: medium
+score: 55
+mitre: ["T1564.001"]
+foreach: suspicious_files
+when: 'item.hidden == true'
+evidence:
+  path: item.path
+  mode: item.mode
+dedup: ["item.path"]
+---
+id: python-pth-code-execution
+title: ".pth file with code (import) — runs on every Python startup"
+category: persistence
+severity: high
+score: 75
+mitre: ["T1546"]
+foreach: pth_files
+when: 'item.import_lines.size() > 0'
+evidence:
+  path: item.path
+  imports: item.import_lines
+dedup: ["item.path"]
+---
+id: immutable-sensitive-file
+title: "Sensitive file set immutable (chattr +i) — protecting persistence"
+category: file
+severity: medium
+score: 50
+mitre: ["T1222.002"]
+foreach: immutable_files
+when: 'item != ""'
+evidence:
+  path: item
+dedup: ["item"]
+---
+id: shell-history-disabled
+title: "Shell rc disables command history (anti-forensics)"
+category: evasion
+severity: medium
+score: 60
+mitre: ["T1070.003"]
+# HISTFILE=/dev/null, HISTSIZE=0, unset HISTFILE or `set +o history` in a shell rc
+# is a deliberate attempt to stop command logging. Normal HISTSIZE/HISTFILESIZE
+# values (1000, ...) are not matched by the collector.
+foreach: shell_history_tampering
+when: 'item.suspicious_lines.size() > 0'
+evidence:
+  path: item.path
+  lines: item.suspicious_lines
+dedup: ["item.path"]
+---
+id: log-file-symlinked
+title: "System log file replaced by a symlink (log wiping anti-forensics)"
+category: evasion
+severity: high
+score: 80
+mitre: ["T1070.002"]
+# A log such as auth.log/wtmp/audit.log pointed at /dev/null (or elsewhere) via a
+# symlink silently discards all future entries. Logs are regular files normally.
+foreach: tampered_logs
+when: 'item != ""'
+evidence:
+  log: item
+dedup: ["item"]
+---
+id: proc-bind-mount-hidden-process
+title: "Bind mount over /proc/<pid> (process-hiding rootkit)"
+category: evasion
+severity: critical
+score: 90
+mitre: ["T1564.001", "T1014"]
+# A mount whose mount point is /proc/<pid> (mount -o bind /fake /proc/PID) hides a
+# running process: its /proc entry shows fake/empty contents. The PID still lists
+# in readdir, so the readdir-diff hidden-process check misses it. Never legitimate.
+foreach: proc_mount_hides
+when: 'item != ""'
+evidence:
+  mount_point: item
+dedup: ["item"]
+---
+id: yama-ptrace-scope-disabled
+title: "Yama ptrace_scope set to 0 (process-injection hardening disabled)"
+category: evasion
+severity: medium
+score: 55
+mitre: ["T1562.001"]
+# kernel.yama.ptrace_scope=0 lets any process ptrace any other (process injection,
+# credential theft). Distros default to 1; an LKM/attacker resetting it to 0 is a
+# defense-evasion signal. Some containers/dev hosts set 0, hence medium severity.
+when: 'has(snapshot.facts.yama_ptrace_scope) && snapshot.facts.yama_ptrace_scope == 0'
+evidence:
+  ptrace_scope: snapshot.facts.yama_ptrace_scope
+---
+id: sysctl-hardening-disabled
+title: "sysctl config disables a kernel hardening control (ptrace_scope/kptr_restrict/bpf/dmesg)"
+category: evasion
+severity: medium
+score: 60
+mitre: ["T1562.001"]
+# A drop-in in /etc/sysctl.{conf,d} setting kernel.yama.ptrace_scope / kptr_restrict /
+# unprivileged_bpf_disabled / dmesg_restrict to 0 persistently weakens defenses —
+# the durable counterpart of the runtime yama-ptrace-scope-disabled check. Distros
+# default these to 1/2, so an explicit 0 in config is suspicious (low-FP).
+foreach: sysctl_hardening_off
+when: 'item != ""'
+evidence:
+  entry: item
+dedup: ["item"]
+---
+id: selinux-disabled
+title: "SELinux disabled where it is installed (config or kernel cmdline)"
+category: evasion
+severity: medium
+score: 60
+mitre: ["T1562.001"]
+# On RPM/SELinux distros /etc/selinux/config defaults to enforcing; a value of
+# disabled/permissive, or a kernel cmdline carrying selinux=0 / enforcing=0, turns
+# the mandatory-access-control layer off — a common defense-evasion step after a
+# compromise. The collector only reports this where SELinux is installed (the
+# config file exists), so AppArmor distros (Debian/Ubuntu) do not false-positive.
+foreach: selinux_disabled
+when: 'item != ""'
+evidence:
+  detail: item
+dedup: ["item"]

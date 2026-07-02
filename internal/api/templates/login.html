@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>bladedr · sign in</title>
+<style>
+  :root{--bg:#0b0e14;--panel:#141925;--text:#e6edf3;--muted:#8b98a9;--accent:#3b82f6;--border:#26303f}
+  *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 system-ui,sans-serif;
+    display:flex;min-height:100vh;align-items:center;justify-content:center}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:2rem;width:340px}
+  .brand{text-align:center;margin-bottom:.3rem}
+  .brand img{max-width:100%;height:auto}
+  label{display:block;color:var(--muted);font-size:.85rem;margin:.9rem 0 .25rem}
+  input{width:100%;padding:.6rem .7rem;background:#0b0e14;border:1px solid var(--border);border-radius:8px;color:var(--text)}
+  button{width:100%;margin-top:1.2rem;padding:.65rem;background:var(--accent);color:#fff;border:0;border-radius:8px;font-weight:600;cursor:pointer}
+  .err{color:#f87171;font-size:.85rem;margin-top:.8rem;min-height:1rem}
+  .sub{color:var(--muted);font-size:.85rem;margin-top:.3rem}
+</style></head>
+<body>
+  <form class="card" onsubmit="return signin(event)">
+    <div class="brand"><img src="/ui/logo.png" alt="bladedr" width="240"></div>
+    <div class="sub">agentless + eBPF threat hunting</div>
+    <label>Username</label><input id="u" autofocus autocomplete="username">
+    <label>Password</label><input id="p" type="password" autocomplete="current-password">
+    <button type="submit">Sign in</button>
+    <div class="err" id="err"></div>
+  </form>
+<script>
+function signin(e){
+  e.preventDefault();
+  fetch('/api/v1/login',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({Username:document.getElementById('u').value,Password:document.getElementById('p').value})})
+    .then(function(r){ if(r.ok){location.href='/ui';} else {document.getElementById('err').textContent='Invalid credentials';} })
+    .catch(function(){document.getElementById('err').textContent='network error';});
+  return false;
+}
+</script>
+</body></html>

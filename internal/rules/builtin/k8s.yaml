@@ -1,0 +1,31 @@
+id: k8s-static-pod-suspicious
+title: "Non-standard privileged/host* static pod manifest (Kubernetes node persistence)"
+category: persistence
+severity: high
+score: 85
+mitre: ["T1610", "T1543"]
+# Kubelet runs any manifest in /etc/kubernetes/manifests directly. A non-standard
+# one (not kube-apiserver/etcd/...) that is privileged, shares host namespaces,
+# mounts the container-runtime socket / hostPath, or runs a cradle is root-level
+# container persistence (the "static hidden pod"). Standard components are excluded.
+foreach: k8s_static_pods
+when: 'item.suspicious_lines.size() > 0'
+evidence:
+  path: item.path
+  findings: item.suspicious_lines
+dedup: ["item.path"]
+---
+id: k8s-kubeconfig-exposed
+title: "Kubernetes kubeconfig/admin credentials readable by a non-root user"
+category: credential
+severity: high
+score: 80
+mitre: ["T1552.001"]
+# admin.conf / a kubeconfig embeds client keys or tokens granting cluster access;
+# readable by non-root it is a credential-theft → cluster-takeover path. Normally
+# these are root-only (0600).
+foreach: exposed_kubeconfigs
+when: 'item != ""'
+evidence:
+  path: item
+dedup: ["item"]

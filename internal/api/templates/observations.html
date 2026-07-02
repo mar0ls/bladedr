@@ -1,0 +1,87 @@
+{{define "content"}}
+<h1>Findings</h1>
+<div class="card">
+  <form class="toolbar" method="get" action="/ui/observations">
+    <input type="search" name="q" value="{{.Filter.Q}}" placeholder="🔍 BM25 search — evidence, title, rule…">
+    <select name="severity">
+      <option value="">severity: any</option>
+      {{range .Severities}}<option value="{{.}}"{{if eq . $.Filter.Severity}} selected{{end}}>{{.}}</option>{{end}}
+    </select>
+    <select name="status">
+      <option value="">status: any</option>
+      {{range .Statuses}}<option value="{{.}}"{{if eq . $.Filter.Status}} selected{{end}}>{{.}}</option>{{end}}
+    </select>
+    <select name="host">
+      <option value="">host: any</option>
+      {{range .HostList}}<option value="{{.ID}}"{{if eq .ID $.Filter.Host}} selected{{end}}>{{.Display}}</option>{{end}}
+    </select>
+    <button class="primary" type="submit">Filter</button>
+    <span class="pill">{{len .Rows}} result(s)</span>
+  </form>
+</div>
+
+<div class="card">
+{{if .Rows}}
+<div class="toolbar" style="margin-bottom:.7rem">
+  <span class="muted" id="selcount">0 selected</span>
+  <select id="bulkstatus">
+    <option value="acknowledged">acknowledge</option>
+    <option value="resolved">resolve</option>
+    <option value="false_positive">false positive</option>
+    <option value="open">reopen</option>
+  </select>
+  <button class="primary" onclick="bulkApply()">Apply to selected</button>
+</div>
+<table>
+  <thead><tr><th><input type="checkbox" id="selall" onclick="toggleAll(this)"></th><th>sev</th><th>rule</th><th>mitre</th><th>host</th><th>evidence</th><th>seen</th><th>status</th><th>triage</th></tr></thead>
+  <tbody>
+  {{range .Rows}}
+    <tr id="row-{{.ID}}">
+      <td><input type="checkbox" class="selrow" value="{{.ID}}" onclick="updateCount()"></td>
+      <td><span class="badge sev-{{.Severity}}">{{.Severity}}</span></td>
+      <td><b>{{.RuleID}}</b>{{if gt .Count 1}} <span class="count">×{{.Count}}</span>{{end}}<div class="faint">{{.Title}}</div></td>
+      <td>{{range .Mitre}}<a class="tag" href="{{mitreURL .}}" target="_blank" rel="noopener">{{.}}</a>{{end}}</td>
+      <td>{{.Hostname}}</td>
+      <td class="ev">{{.EvidenceStr}}</td>
+      <td class="muted">{{.LastSeenStr}}</td>
+      <td class="obs-{{.Status}}">{{.Status}}</td>
+      <td class="act">
+        <button onclick="triage('{{.ID}}','acknowledged')">Ack</button>
+        <button onclick="triage('{{.ID}}','resolved')">Resolve</button>
+        <button class="danger" onclick="triage('{{.ID}}','false_positive')">FP</button>
+      </td>
+    </tr>
+  {{end}}
+  </tbody>
+</table>
+{{else}}
+  <div class="empty">No findings match the filter. 🎉</div>
+{{end}}
+</div>
+
+<script>
+function triage(id, status){
+  fetch('/api/v1/observations/'+id, {
+    method:'PATCH', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({status: status})
+  }).then(function(r){
+    if(r.ok){ location.reload(); } else { alert('triage failed: HTTP '+r.status); }
+  });
+}
+function selected(){ return Array.prototype.map.call(document.querySelectorAll('.selrow:checked'), function(c){return c.value;}); }
+function updateCount(){ document.getElementById('selcount').textContent = selected().length + ' selected'; }
+function toggleAll(cb){ document.querySelectorAll('.selrow').forEach(function(c){c.checked=cb.checked;}); updateCount(); }
+function bulkApply(){
+  var ids = selected();
+  if(!ids.length){ alert('Select at least one finding.'); return; }
+  var status = document.getElementById('bulkstatus').value;
+  if(!confirm('Set '+ids.length+' finding(s) to "'+status+'"?')) return;
+  fetch('/api/v1/observations/bulk', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ids: ids, status: status})
+  }).then(function(r){ return r.json(); })
+    .then(function(d){ location.reload(); })
+    .catch(function(){ alert('bulk action failed'); });
+}
+</script>
+{{end}}

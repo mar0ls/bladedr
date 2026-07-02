@@ -1,0 +1,71 @@
+{{define "content"}}
+<h1>Schedules</h1>
+
+<details class="panel"{{if not .Rows}} open{{end}}>
+  <summary>New schedule</summary>
+  <div class="card">
+    <!-- CSRF protected by the SameSite=Lax session cookie; Go html/template, not Django. -->
+    <!-- nosemgrep: python.django.security.django-no-csrf-token.django-no-csrf-token -->
+    <form method="post" action="/ui/schedules" class="toolbar" style="gap:.6rem">
+      <input name="name" placeholder="name (e.g. nightly)">
+      <select name="target" id="target" onchange="onTarget()">
+        <option value="all">all hosts</option>
+        <option value="host">single host</option>
+        <option value="collection">collection</option>
+      </select>
+      <select name="host_id" id="host_id" style="display:none">
+        {{range .HostList}}<option value="{{.ID}}">{{.Display}}</option>{{end}}
+      </select>
+      <select name="collection_id" id="collection_id" style="display:none">
+        {{range .Collections}}<option value="{{.ID}}">{{.Name}}</option>{{end}}
+      </select>
+      <input name="interval" value="15m" size="6" title="interval, e.g. 15m, 1h">
+      <button class="primary" type="submit">Create</button>
+    </form>
+  </div>
+</details>
+
+<div class="card">
+{{if .Rows}}
+<table>
+  <thead><tr><th>name</th><th>target</th><th>interval</th><th>enabled</th><th>last run</th><th>next run</th><th>actions</th></tr></thead>
+  <tbody>
+  {{range .Rows}}
+    <tr>
+      <td><b>{{if .Name}}{{.Name}}{{else}}<span class="faint">(unnamed)</span>{{end}}</b></td>
+      <td>{{.Target}}</td>
+      <td class="muted">{{.IntervalStr}}</td>
+      <td>{{if .Enabled}}<span class="st-online"><span class="dot"></span>on</span>{{else}}<span class="st-disabled"><span class="dot"></span>off</span>{{end}}</td>
+      <td class="muted">{{.LastRunStr}}</td>
+      <td class="muted">{{.NextRunStr}}</td>
+      <td class="act">
+        <button onclick="runNow('{{.ID}}', this)">Run now</button>
+        <button onclick="toggle('{{.ID}}', {{not .Enabled}})">{{if .Enabled}}Disable{{else}}Enable{{end}}</button>
+        <button class="danger" onclick="del('{{.ID}}')">Delete</button>
+      </td>
+    </tr>
+  {{end}}
+  </tbody>
+</table>
+{{else}}
+  <div class="empty">No schedules yet — create one above to scan on a recurring interval.</div>
+{{end}}
+</div>
+
+<script>
+function onTarget(){
+  var t=document.getElementById('target').value;
+  document.getElementById('host_id').style.display = t==='host'?'':'none';
+  document.getElementById('collection_id').style.display = t==='collection'?'':'none';
+}
+function runNow(id,btn){ btn.disabled=true; btn.textContent='running…';
+  fetch('/api/v1/schedules/'+id+'/run',{method:'POST'}).then(function(r){return r.json();})
+    .then(function(s){btn.textContent='ran '+(s.length||0)+' scan(s)';setTimeout(function(){location.reload();},900);})
+    .catch(function(){btn.textContent='failed';btn.disabled=false;}); }
+function toggle(id,enabled){
+  fetch('/api/v1/schedules/'+id,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:enabled})})
+    .then(function(r){if(r.ok){location.reload();}else{alert('failed');}}); }
+function del(id){ if(!confirm('Delete this schedule?'))return;
+  fetch('/api/v1/schedules/'+id,{method:'DELETE'}).then(function(r){if(r.ok){location.reload();}else{alert('failed');}}); }
+</script>
+{{end}}

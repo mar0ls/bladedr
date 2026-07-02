@@ -1,0 +1,92 @@
+{{define "content"}}
+<h1>Hosts</h1>
+
+<details class="panel">
+  <summary>Add host</summary>
+  <div class="card">
+    <!-- CSRF protected by the SameSite=Lax session cookie (cross-site POSTs omit it); Go html/template, not Django. -->
+    <!-- nosemgrep: python.django.security.django-no-csrf-token.django-no-csrf-token -->
+    <form method="post" action="/ui/hosts" class="toolbar" style="gap:.6rem">
+      <input name="primary_ip" placeholder="IP address" required>
+      <input name="hostname" placeholder="hostname (optional)">
+      <input name="ssh_port" value="22" size="4" title="SSH port">
+      <input name="username" placeholder="ssh user" required>
+      <select name="auth_type">
+        <option value="password">password</option>
+        <option value="ssh_key">ssh private key</option>
+      </select>
+      <select name="arch"><option value="amd64">amd64</option><option value="arm64">arm64</option></select>
+      <select name="mode" title="scan mode">
+        <option value="scan_only">scan_only</option>
+        <option value="scan_plus_sensor">scan_plus_sensor (eBPF)</option>
+      </select>
+      <textarea name="secret" rows="2" style="flex-basis:100%" placeholder="password, or paste the SSH private key (PEM)" required></textarea>
+      <button class="primary" type="submit">Add host</button>
+      <span class="faint">secret is sealed with the node key (split-trust) — never stored in plaintext</span>
+    </form>
+  </div>
+</details>
+
+<div class="card">
+  <form class="toolbar" method="get" action="/ui/hosts">
+    <input type="search" name="tag" value="{{.TagFilter}}" placeholder="tag filter, e.g. env=prod">
+    <button type="submit">Filter</button>
+    <span class="pill">{{len .Rows}} host(s)</span>
+  </form>
+</div>
+
+<div class="card">
+{{if .Rows}}
+<table>
+  <thead><tr><th>host</th><th>ip</th><th>status</th><th>arch / kernel</th><th>tags</th><th>findings</th><th>eBPF sensor</th><th>last seen</th><th>actions</th></tr></thead>
+  <tbody>
+  {{range .Rows}}
+    <tr>
+      <td><b>{{if .Hostname}}{{.Hostname}}{{else}}<span class="faint">(unnamed)</span>{{end}}</b></td>
+      <td class="muted">{{.PrimaryIP}}</td>
+      <td><span class="st-{{.Status}}"><span class="dot"></span>{{.Status}}</span></td>
+      <td class="muted">{{.Arch}} {{.Kernel}}</td>
+      <td>{{range .TagPairs}}<span class="tag">{{.}}</span>{{end}}</td>
+      <td>{{if .OpenFindings}}<a href="/ui/observations?host={{.ID}}&status=open"><span class="badge sev-high">{{.OpenFindings}} open</span></a>{{else}}<span class="faint">0</span>{{end}}</td>
+      <td>
+        {{if .SensorOn}}<span class="badge sev-medium">scan+sensor</span>{{if .EbpfCount}} <a class="muted" href="/ui/observations?host={{.ID}}&source=ebpf_sensor" title="eBPF events seen">{{.EbpfCount}} ev</a>{{end}}
+          <button onclick="setSensor('{{.ID}}',false,this)">Disable</button>
+        {{else}}<span class="faint">scan only</span> <button onclick="setSensor('{{.ID}}',true,this)">Enable</button>{{end}}
+      </td>
+      <td class="muted">{{.LastSeenStr}}</td>
+      <td class="act">
+        <button class="primary" onclick="scanHost('{{.ID}}', this)">Scan</button>
+        <a class="btn" href="/ui/hosts/{{.ID}}/edit">Edit</a>
+        <button class="danger" onclick="deleteHost('{{.ID}}', '{{if .Hostname}}{{.Hostname}}{{else}}{{.PrimaryIP}}{{end}}')">Delete</button>
+      </td>
+    </tr>
+  {{end}}
+  </tbody>
+</table>
+{{else}}
+  <div class="empty">No hosts yet — use <b>Add host</b> above.</div>
+{{end}}
+</div>
+
+<script>
+function scanHost(id, btn){
+  btn.disabled=true; btn.textContent='scanning…';
+  fetch('/api/v1/hosts/'+id+'/scans',{method:'POST'})
+    .then(function(r){return r.json();})
+    .then(function(s){btn.textContent=(s.status||'done')+' · risk '+(s.risk_score||0);setTimeout(function(){location.reload();},900);})
+    .catch(function(){btn.textContent='failed';btn.disabled=false;});
+}
+function deleteHost(id,name){
+  if(!confirm('Delete host '+name+'? This removes its scans and findings.'))return;
+  fetch('/api/v1/hosts/'+id,{method:'DELETE'})
+    .then(function(r){if(r.ok){location.reload();}else{alert('delete failed: HTTP '+r.status);}});
+}
+function setSensor(id,on,btn){
+  var action = on ? 'enable' : 'disable';
+  if(btn){btn.disabled=true; btn.textContent = on ? 'deploying…' : 'stopping…';}
+  fetch('/api/v1/hosts/'+id+'/sensor',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:action})})
+    .then(function(r){return r.ok?r.json().then(function(){location.reload();}):r.text().then(function(t){alert(action+' failed: '+t); if(btn){btn.disabled=false; btn.textContent=on?'Enable':'Disable';}});})
+    .catch(function(e){alert('error: '+e); if(btn){btn.disabled=false;}});
+}
+</script>
+{{end}}

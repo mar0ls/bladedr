@@ -1,0 +1,86 @@
+id: sudoers-dangerous-rule
+title: "Dangerous sudoers grant (NOPASSWD: ALL, SETENV, or writable-path command)"
+category: privilege
+severity: high
+score: 80
+mitre: ["T1548.003"]
+foreach: sudo_rules
+when: >
+  item.line.contains("NOPASSWD: ALL") || item.line.contains("NOPASSWD:ALL") ||
+  item.line.contains("SETENV") ||
+  item.line.contains("/tmp/") || item.line.contains("/dev/shm/")
+evidence:
+  path: item.path
+  line: item.line
+dedup: ["item.path", "item.line"]
+---
+id: nfs-no-root-squash
+title: "NFS export with no_root_squash (remote root writes as local root)"
+category: privilege
+severity: high
+score: 75
+mitre: ["T1548"]
+foreach: nfs_exports
+when: 'item.contains("no_root_squash")'
+evidence:
+  export: item
+dedup: ["item"]
+---
+id: world-writable-sensitive-file
+title: "Sensitive system file is world-writable"
+category: privilege
+severity: critical
+score: 90
+mitre: ["T1222.002"]
+foreach: world_writable_sensitive
+when: 'item != ""'
+evidence:
+  path: item
+dedup: ["item"]
+---
+id: path-hijack-entry
+title: "System PATH contains the current dir or a world-writable dir (command hijack)"
+category: privilege
+severity: high
+score: 80
+mitre: ["T1574.007"]
+foreach: path_hijack
+when: 'item != ""'
+evidence:
+  entry: item
+dedup: ["item"]
+---
+id: sudo-gtfobins-binary
+title: "sudoers grants a GTFOBins shell-escape binary (privilege escalation)"
+category: privilege
+severity: high
+score: 85
+mitre: ["T1548.003"]
+# A sudo grant for find/vim/awk/python/less/tar/... lets the grantee spawn a root
+# shell via that binary (GTFOBins). The plain `ALL` group grant has no path token,
+# so standard %sudo/%admin lines are not matched.
+foreach: sudo_rules
+when: 'item.gtfo_bin != ""'
+evidence:
+  path: item.path
+  line: item.line
+  binary: item.gtfo_bin
+dedup: ["item.path", "item.line"]
+---
+id: sudo-env-keep-ld
+title: "sudoers env_keep preserves LD_PRELOAD/LD_LIBRARY_PATH/LD_AUDIT (privilege escalation)"
+category: privilege
+severity: critical
+score: 90
+mitre: ["T1548.003", "T1574.006"]
+# `Defaults env_keep += "LD_PRELOAD"` (or LD_LIBRARY_PATH/LD_AUDIT) lets a user
+# carry an attacker .so through sudo into the root process — instant root. sudo
+# strips these by default, so an explicit keep is a backdoor/misconfig.
+foreach: sudo_rules
+when: >
+  item.line.contains("env_keep") && (item.line.contains("LD_PRELOAD") ||
+  item.line.contains("LD_LIBRARY_PATH") || item.line.contains("LD_AUDIT"))
+evidence:
+  path: item.path
+  line: item.line
+dedup: ["item.path", "item.line"]

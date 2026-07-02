@@ -1,0 +1,25 @@
+{{define "content"}}
+<h1>Audit log <span class="pill">{{len .Events}}</span></h1>
+<p class="muted" style="margin:-.3rem 0 1rem">Security events: logins, user/role changes, sensor deploys, access denials.
+  Newest first (last 500).</p>
+
+<div class="card">
+<table>
+  <thead><tr><th>time (UTC)</th><th>actor</th><th>ip</th><th>action</th><th>target</th><th>result</th><th>detail</th></tr></thead>
+  <tbody>
+  {{range .Events}}
+    <tr>
+      <td class="muted">{{.Time.Format "2006-01-02 15:04:05"}}</td>
+      <td><b>{{if .Actor}}{{.Actor}}{{else}}<span class="faint">—</span>{{end}}</b></td>
+      <td class="muted">{{.ActorIP}}</td>
+      <td><code>{{.Action}}</code></td>
+      <td>{{.Target}}</td>
+      <td>{{if eq .Result "ok"}}<span class="status-dot ok"></span>ok{{else}}<span class="badge sev-high">{{.Result}}</span>{{end}}</td>
+      <td class="muted">{{.Detail}}</td>
+    </tr>
+  {{end}}
+  </tbody>
+</table>
+{{if not .Events}}<div class="empty">No audit events yet.</div>{{end}}
+</div>
+{{end}}

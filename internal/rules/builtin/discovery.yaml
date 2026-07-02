@@ -1,0 +1,13 @@
+id: offensive-tool-on-disk
+title: "Offensive security tool on disk (pspy / LinPEAS / chisel / sliver)"
+category: discovery
+severity: high
+score: 70
+mitre: ["T1588.002", "T1105"]
+# Matched by a content marker unique to the tool (not just a filename), so low-FP.
+foreach: suspicious_files
+when: 'item.tool != ""'
+evidence:
+  path: item.path
+  tool: item.tool
+dedup: ["item.path"]

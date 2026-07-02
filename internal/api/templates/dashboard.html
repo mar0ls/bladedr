@@ -1,0 +1,69 @@
+{{define "content"}}
+<h1>Overview</h1>
+
+<div class="kpis">
+  <a class="kpi" href="/ui/hosts"><div class="kpi-n">{{.Hosts}}</div><div class="kpi-l">hosts</div></a>
+  <a class="kpi" href="/ui/observations?status=open"><div class="kpi-n">{{.OpenTotal}}</div><div class="kpi-l">open findings</div></a>
+  <a class="kpi crit" href="/ui/observations?status=open&severity=critical"><div class="kpi-n">{{.CritHigh}}</div><div class="kpi-l">critical + high</div></a>
+  <a class="kpi" href="/ui/observations?status=acknowledged"><div class="kpi-n">{{.Acknowledged}}</div><div class="kpi-l">acknowledged</div></a>
+  <a class="kpi ok" href="/ui/observations?status=resolved"><div class="kpi-n">{{.Resolved}}</div><div class="kpi-l">resolved</div></a>
+  <a class="kpi muted" href="/ui/observations?status=false_positive"><div class="kpi-n">{{.FalsePositive}}</div><div class="kpi-l">false positive</div></a>
+</div>
+
+<div class="dash-grid">
+  <div class="card">
+    <h2>Open findings by severity</h2>
+    {{range .SevBars}}
+      <div class="barrow"><span class="barlabel"><span class="badge {{.Class}}">{{.Label}}</span></span>
+        <span class="bartrack"><span class="barfill {{.Class}}" style="width:{{.Pct}}%"></span></span>
+        <span class="barval">{{.Count}}</span></div>
+    {{end}}
+  </div>
+
+  <div class="card">
+    <h2>Top MITRE techniques (open)</h2>
+    {{if .MitreBars}}{{range .MitreBars}}
+      <div class="barrow"><a class="barlabel" href="{{mitreURL .Label}}" target="_blank" rel="noopener">{{.Label}}</a>
+        <span class="bartrack"><span class="barfill" style="width:{{.Pct}}%"></span></span>
+        <span class="barval">{{.Count}}</span></div>
+    {{end}}{{else}}<div class="empty">No open findings.</div>{{end}}
+  </div>
+
+  <div class="card">
+    <h2>Top rules (open)</h2>
+    {{if .RuleBars}}{{range .RuleBars}}
+      <div class="barrow"><a class="barlabel" href="/ui/observations?status=open&q={{.Label}}" title="{{.Label}}">{{.Label}}</a>
+        <span class="bartrack"><span class="barfill" style="width:{{.Pct}}%"></span></span>
+        <span class="barval">{{.Count}}</span></div>
+    {{end}}{{else}}<div class="empty">No open findings.</div>{{end}}
+  </div>
+
+  <div class="card">
+    <h2>Hosts by open findings</h2>
+    {{if .HostBars}}{{range .HostBars}}
+      <div class="barrow"><span class="barlabel" title="{{.Label}}">{{.Label}}</span>
+        <span class="bartrack"><span class="barfill" style="width:{{.Pct}}%"></span></span>
+        <span class="barval">{{.Count}}</span></div>
+    {{end}}{{else}}<div class="empty">No open findings.</div>{{end}}
+  </div>
+</div>
+
+<style>
+  .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:.8rem;margin-bottom:1.2rem}
+  .kpi{display:block;background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:1rem 1.1rem;text-decoration:none;color:var(--text);transition:.12s}
+  .kpi:hover{border-color:var(--accent);text-decoration:none;transform:translateY(-1px)}
+  .kpi-n{font-size:2rem;font-weight:800;line-height:1}
+  .kpi-l{color:var(--muted);font-size:12.5px;margin-top:.3rem;text-transform:uppercase;letter-spacing:.04em}
+  .kpi.crit .kpi-n{color:#ff8097}.kpi.ok .kpi-n{color:var(--green)}.kpi.muted .kpi-n{color:var(--muted)}
+  .dash-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(360px,1fr));gap:1.1rem}
+  .dash-grid h2{font-size:.95rem;margin:.1rem 0 .9rem;font-weight:600;color:var(--text)}
+  .barrow{display:flex;align-items:center;gap:.6rem;margin:.35rem 0}
+  .barlabel{flex:0 0 12rem;font-size:12.5px;color:var(--accent);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  span.barlabel{color:var(--text)}
+  .bartrack{flex:1;background:#0d1117;border-radius:6px;height:14px;overflow:hidden}
+  .barfill{display:block;height:100%;background:linear-gradient(90deg,#1f6feb,#58a6ff);border-radius:6px;min-width:2px}
+  .barfill.sev-critical{background:#f0506e}.barfill.sev-high{background:#e08a3c}
+  .barfill.sev-medium{background:#d9a72a}.barfill.sev-low{background:#586878}
+  .barval{flex:0 0 2.5rem;text-align:right;font-variant-numeric:tabular-nums;color:var(--muted);font-size:12.5px}
+</style>
+{{end}}

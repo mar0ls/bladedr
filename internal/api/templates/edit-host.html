@@ -1,0 +1,44 @@
+{{define "content"}}
+<h1>Edit host</h1>
+<div class="card" style="max-width:560px">
+  <form method="post" action="/ui/hosts/{{.Host.ID}}/edit" style="display:flex;flex-direction:column;gap:.8rem">
+    <label class="fld">IP (read-only)
+      <input value="{{.Host.PrimaryIP}}" disabled>
+    </label>
+    <label class="fld">Hostname
+      <input name="hostname" value="{{.Host.Hostname}}" placeholder="hostname">
+    </label>
+    <label class="fld">SSH port
+      <input name="ssh_port" value="{{.Host.SSHPort}}" size="5">
+    </label>
+    <fieldset style="border:1px solid var(--border);border-radius:8px;padding:.6rem .8rem">
+      <legend class="muted" style="font-size:12px">Connection / credential — leave secret blank to keep current</legend>
+      <label class="fld">SSH user
+        <input name="username" value="{{.Username}}" placeholder="ssh user">
+      </label>
+      <label class="fld">Auth method
+        <select name="auth_type">
+          <option value="password"{{if eq .AuthType "password"}} selected{{end}}>password</option>
+          <option value="ssh_key"{{if eq .AuthType "ssh_key"}} selected{{end}}>ssh private key</option>
+        </select>
+      </label>
+      <label class="fld">New secret (password or paste private key)
+        <textarea name="secret" rows="2" placeholder="leave blank to keep current credential"></textarea>
+      </label>
+    </fieldset>
+    <label class="fld">Mode
+      <select name="mode">
+        <option value="scan_only"{{if eq .Host.Mode "scan_only"}} selected{{end}}>scan_only</option>
+        <option value="scan_plus_sensor"{{if eq .Host.Mode "scan_plus_sensor"}} selected{{end}}>scan_plus_sensor (eBPF)</option>
+      </select>
+    </label>
+    <label class="fld">Tags — one <code>key=value</code> per line
+      <textarea name="tags" rows="4" placeholder="env=prod&#10;team=sec">{{.TagsText}}</textarea>
+    </label>
+    <div class="toolbar">
+      <button class="primary" type="submit">Save</button>
+      <a class="btn" href="/ui/hosts">Cancel</a>
+    </div>
+  </form>
+</div>
+{{end}}

@@ -1,0 +1,24 @@
+# ParadeDB = PostgreSQL + pg_search (BM25), the bladedr production backend.
+# Bring up with: docker compose up -d
+# The server auto-applies the schema on startup; for a manual apply use `make migrate`.
+services:
+  db:
+    image: paradedb/paradedb:latest
+    container_name: bladedr-db
+    environment:
+      POSTGRES_USER: bladedr
+      POSTGRES_PASSWORD: bladedr
+      POSTGRES_DB: bladedr
+    ports:
+      - "5432:5432"
+    volumes:
+      # PG18+ images expect the mount at /var/lib/postgresql (data goes in a subdir).
+      - bladedr_pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bladedr"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  bladedr_pgdata:

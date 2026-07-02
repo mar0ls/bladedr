@@ -1,0 +1,92 @@
+id: unsigned-out-of-tree-module
+title: "Loaded unsigned out-of-tree kernel module"
+category: kernel
+severity: high
+score: 80
+mitre: ["T1547.006"]
+foreach: kernel_modules
+when: 'item.out_of_tree == true && item.signed == false'
+evidence:
+  name: item.name
+dedup: ["item.name"]
+---
+id: hidden-kernel-module
+title: "Module in /proc/modules hidden from /sys/module (self-hiding LKM rootkit)"
+category: kernel
+severity: critical
+score: 95
+mitre: ["T1014"]
+foreach: hidden_modules
+when: 'item != ""'
+evidence:
+  module: item
+dedup: ["item"]
+---
+id: kernel-forced-module-taint
+title: "Kernel tainted by a force-loaded module (insmod -f)"
+category: kernel
+severity: high
+score: 70
+mitre: ["T1547.006"]
+when: 'has(snapshot.facts.kernel_taint_chars) && string(snapshot.facts.kernel_taint_chars).contains("F")'
+evidence:
+  taint: snapshot.facts.kernel_taint_chars
+---
+id: kallsyms-rootkit-symbol
+title: "/proc/kallsyms symbol matching a known rootkit / kernel hook"
+category: kernel
+severity: critical
+score: 95
+mitre: ["T1014"]
+foreach: suspicious_ksyms
+when: 'item != ""'
+evidence:
+  symbol: item
+dedup: ["item"]
+---
+id: kernel-lockdown-disabled
+title: "Kernel lockdown is disabled (none)"
+category: kernel
+severity: low
+score: 20
+mitre: ["T1562.001"]
+# Disabled by default on non-Secure-Boot systems, so this ships OFF (opt-in) to
+# avoid firing on nearly every host; enable it where lockdown is expected.
+enabled: false
+when: 'has(snapshot.facts.kernel_lockdown) && snapshot.facts.kernel_lockdown == "none"'
+evidence:
+  lockdown: snapshot.facts.kernel_lockdown
+---
+id: ebpf-pinned-object-toplevel
+title: "Top-level pinned BPF object in /sys/fs/bpf (possible eBPF rootkit handle)"
+category: kernel
+severity: medium
+score: 50
+mitre: ["T1014"]
+# Top-level pins are unusual (orchestrators nest under subdirs), but some setups
+# legitimately pin at the root — ships OFF (opt-in) until validated per environment.
+enabled: false
+foreach: bpf_pinned
+when: 'item != ""'
+evidence:
+  pinned: item
+dedup: ["item"]
+---
+id: ebpf-program-rootkit-name
+title: "Loaded eBPF program with a known offensive/rootkit name"
+category: kernel
+severity: critical
+score: 90
+mitre: ["T1014", "T1547.006"]
+# Enumerated via bpf(BPF_PROG_GET_NEXT_ID); matched on the program name (BTF/ELF),
+# not on pins, so it catches non-persistent eBPF rootkits too. Names come from
+# public offensive eBPF tooling: bad-bpf (pidhide/sudoadd/writeblock/exechijack/
+# bpfdos), ebpfkit, boopkit, TripleCross. Name-based so it stays low-FP.
+foreach: bpf_programs
+when: 'item.name.matches("(?i)(pidhide|sudoadd|writeblock|exechijack|bpfdos|ebpfkit|boopkit|triplecross|rootkit|backdoor|sshd_inject)")'
+evidence:
+  id: item.id
+  name: item.name
+  type: item.type
+  tag: item.tag
+dedup: ["item.tag"]

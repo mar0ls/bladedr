@@ -1,0 +1,23 @@
+{{define "content"}}
+<h1>eBPF policies <span class="pill">{{len .Policies}}</span></h1>
+<p class="muted" style="margin:-.3rem 0 1rem">TracingPolicies shipped with the sensor (Tetragon). Runtime coverage complements
+  the agentless scan. Sorted by severity.</p>
+
+<div class="card">
+<table>
+  <thead><tr><th>name</th><th>title</th><th>category</th><th>severity</th><th>MITRE</th></tr></thead>
+  <tbody>
+  {{range .Policies}}
+    <tr>
+      <td><code>{{.Name}}</code></td>
+      <td>{{.Title}}</td>
+      <td class="muted">{{.Category}}</td>
+      <td><span class="badge sev-{{.Severity}}">{{.Severity}}</span></td>
+      <td>{{range .Mitre}}<a class="tag" href="{{mitreURL .}}" target="_blank" rel="noopener">{{.}}</a>{{end}}</td>
+    </tr>
+  {{end}}
+  </tbody>
+</table>
+{{if not .Policies}}<div class="empty">No eBPF policies loaded (set BLADEDR_POLICY_DIR to ship a TracingPolicy catalog).</div>{{end}}
+</div>
+{{end}}

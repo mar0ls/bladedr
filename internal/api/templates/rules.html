@@ -1,0 +1,65 @@
+{{define "content"}}
+<h1>Rules <span class="pill">{{.Enabled}}/{{.Total}} enabled</span></h1>
+<p class="muted" style="margin:-.3rem 0 1rem">Agentless detection rules (builtin + custom). eBPF detections are Tetragon
+policies — see <a href="/ui/observations?source=ebpf_sensor">runtime findings</a>.</p>
+
+<details class="panel">
+  <summary>Add a custom rule (YAML)</summary>
+  <div class="card">
+    <p class="muted">Paste one rule (YAML or JSON). It is CEL-validated on save and active on the next scan. A rule with an
+      existing id overrides that builtin.</p>
+    <textarea id="ruleyaml" rows="12" style="width:100%;font-family:monospace;font-size:.85rem"
+      placeholder="id: my-loader-watch
+title: &quot;Suspicious loader in /opt&quot;
+category: persistence
+severity: high
+mitre: [&quot;T1543&quot;]
+foreach: persistence.systemd_units
+when: 'item.exec_start.startsWith(&quot;/opt/&quot;)'
+evidence:
+  name: item.name
+dedup: [&quot;item.name&quot;]"></textarea>
+    <div class="toolbar" style="margin-top:.5rem"><button class="primary" onclick="addRule()">Save rule</button>
+      <span id="addmsg" class="muted"></span></div>
+  </div>
+</details>
+
+<div class="card">
+<table>
+  <thead><tr><th>category</th><th>rule</th><th>severity</th><th>MITRE</th><th>source</th><th>state</th><th>actions</th></tr></thead>
+  <tbody>
+  {{range .Rows}}
+    <tr>
+      <td>{{.Category}}</td>
+      <td><code>{{.ID}}</code><br><span class="muted">{{.Title}}</span></td>
+      <td><span class="badge sev-{{.Severity}}">{{.Severity}}</span></td>
+      <td>{{range .Mitre}}<a class="tag" href="{{mitreURL .}}" target="_blank" rel="noopener">{{.}}</a>{{end}}</td>
+      <td>{{if .IsUser}}<span class="tag">custom</span>{{else}}<span class="muted">builtin</span>{{end}}</td>
+      <td>{{if .Enabled}}<span class="status-dot ok"></span>enabled{{else}}<span class="status-dot"></span>disabled{{end}}</td>
+      <td>
+        {{if .Enabled}}<button onclick="toggleRule('{{.ID}}',false)">Disable</button>
+        {{else}}<button onclick="toggleRule('{{.ID}}',true)">Enable</button>{{end}}
+        {{if .IsUser}}<button class="danger" onclick="delRule('{{.ID}}')">Delete</button>{{end}}
+      </td>
+    </tr>
+  {{end}}
+  </tbody>
+</table>
+</div>
+
+<script>
+function addRule(){
+  var body=document.getElementById('ruleyaml').value;
+  fetch('/api/v1/rules',{method:'POST',headers:{'Content-Type':'application/yaml'},body:body})
+    .then(function(r){return r.ok?r.json().then(function(){location.reload()}):r.text().then(function(t){document.getElementById('addmsg').textContent='error: '+t})});
+}
+function toggleRule(id,en){
+  fetch('/api/v1/rules/'+id,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:en})})
+    .then(function(r){if(r.ok)location.reload();else r.text().then(function(t){alert('error: '+t)})});
+}
+function delRule(id){
+  if(!confirm('Delete custom rule '+id+'? (a builtin of the same id reverts to enabled)'))return;
+  fetch('/api/v1/rules/'+id,{method:'DELETE'}).then(function(r){if(r.ok||r.status==204)location.reload();else alert('error')});
+}
+</script>
+{{end}}

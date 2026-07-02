@@ -1,0 +1,273 @@
+# bladedr poligon — technique registry.
+#
+# Each entry drives one plant/scan/label cycle. `expect` is the rule the planted
+# artifact SHOULD trigger (the detection-coverage assertion); the orchestrator also
+# records any other rules that fire (incidental detections). `variants` lists the
+# naming styles to run — both share the structural trigger, differing only in name.
+techniques:
+  # TA0003 Persistence
+  - id: cron-cradle
+    tactic: persistence
+    expect: cron-download-cradle
+  - id: systemd-service
+    tactic: persistence
+    expect: systemd-suspicious-execstart
+  - id: systemd-timer
+    tactic: persistence
+    expect: systemd-timer-suspicious
+  - id: ssh-service-key
+    tactic: persistence
+    expect: ssh-key-in-service-account
+  - id: authorized-keys-option
+    tactic: persistence
+    expect: authorized-keys-suspicious-option
+  - id: udev-run
+    tactic: persistence
+    expect: udev-run-backdoor
+  - id: shell-rc
+    tactic: persistence
+    expect: shell-rc-backdoor
+  - id: python-pth
+    tactic: persistence
+    expect: python-pth-code-execution
+  - id: ld-preload
+    tactic: persistence
+    expect: ld-so-preload-rootkit
+  - id: apt-hook
+    tactic: persistence
+    expect: package-manager-hook-backdoor
+  - id: pam-backdoor
+    tactic: persistence
+    expect: pam-module-unusual-path
+  - id: dnf-plugin
+    tactic: persistence
+    expect: dnf-plugin-writable
+
+  # TA0004 Privilege Escalation
+  - id: uid0-account
+    tactic: privilege
+    expect: unexpected-uid0-account
+  - id: sudoers
+    tactic: privilege
+    expect: sudoers-dangerous-rule
+  - id: suid-writable
+    tactic: privilege
+    expect: suid-in-writable-path
+  - id: nfs-export
+    tactic: privilege
+    expect: nfs-no-root-squash
+
+  # TA0005 Defense Evasion
+  - id: hidden-exec
+    tactic: evasion
+    expect: hidden-executable-in-writable
+  - id: history-disabled
+    tactic: evasion
+    expect: shell-history-disabled
+  - id: log-symlink
+    tactic: evasion
+    expect: log-file-symlinked
+  - id: sysctl-hardening
+    tactic: evasion
+    expect: sysctl-hardening-disabled
+  - id: selinux-disabled
+    tactic: evasion
+    expect: selinux-disabled
+
+  # TA0003 Persistence (batch 2)
+  - id: cron-gtfobins
+    tactic: persistence
+    expect: cron-suspicious-command
+  - id: sshd-backdoor
+    tactic: persistence
+    expect: sshd-backdoor-directive
+  - id: supervisor
+    tactic: persistence
+    expect: supervisor-command-writable
+  - id: modprobe-cmd
+    tactic: persistence
+    expect: modprobe-install-command
+  - id: ldsoconf
+    tactic: persistence
+    expect: ld-so-conf-writable-path
+  - id: global-ldpreload
+    tactic: persistence
+    expect: global-ld-preload
+  - id: systemd-execpre
+    tactic: persistence
+    expect: systemd-exec-directive-writable
+  - id: systemd-revshell
+    tactic: persistence
+    expect: systemd-execstart-reverse-shell
+  - id: startup-cradle
+    tactic: persistence
+    expect: startup-script-cradle
+  - id: at-cradle
+    tactic: persistence
+    expect: at-job-cradle
+  - id: initramfs
+    tactic: persistence
+    expect: initramfs-hook-cradle
+  - id: xdg-autostart
+    tactic: persistence
+    expect: xdg-autostart-suspicious
+  - id: ssh-localcommand
+    tactic: persistence
+    expect: ssh-config-localcommand
+  - id: nsswitch
+    tactic: persistence
+    expect: nsswitch-unusual-module
+  - id: pam-exec
+    tactic: credential
+    expect: pam-exec-backdoor
+  - id: webshell
+    tactic: persistence
+    expect: webshell-in-webroot
+  - id: web-module
+    tactic: persistence
+    expect: web-server-module-writable
+  - id: apt-unverified
+    tactic: supply-chain
+    expect: package-repo-unverified
+
+  # TA0004 Privilege Escalation (batch 2)
+  - id: passwordless
+    tactic: credential
+    expect: passwordless-account
+  - id: privgroup
+    tactic: credential
+    expect: service-account-in-privileged-group
+  - id: sudo-gtfobins
+    tactic: privilege
+    expect: sudo-gtfobins-binary
+  - id: sudo-envkeep
+    tactic: privilege
+    expect: sudo-env-keep-ld
+  - id: cron-path-hijack
+    tactic: privilege
+    expect: cron-path-hijack
+
+  # TA0007 Kubernetes node
+  - id: k8s-static-pod
+    tactic: persistence
+    expect: k8s-static-pod-suspicious
+  - id: k8s-kubeconfig
+    tactic: credential
+    expect: k8s-kubeconfig-exposed
+
+  # Wave #1: runtime (live process/socket during the scan)
+  - id: deleted-binary
+    tactic: process
+    expect: deleted-running-binary
+  - id: exec-world-writable
+    tactic: process
+    expect: exec-from-world-writable
+  - id: masquerade
+    tactic: process
+    expect: masquerade-kernel-thread
+  - id: empty-environ
+    tactic: process
+    expect: process-empty-environ
+  - id: revshell-proc
+    tactic: execution
+    expect: process-reverse-shell-cmdline
+  - id: ssh-tunnel-proc
+    tactic: lateral
+    expect: ssh-tunnel-process
+  - id: port-listener
+    tactic: network
+    expect: suspicious-port-listener
+  - id: packet-sniffer
+    tactic: network
+    expect: packet-sniffer-process
+  - id: miner-c2
+    tactic: network
+    expect: miner-c2-outbound-connection
+  - id: memfd-exec
+    tactic: process
+    expect: memfd-fileless-exec
+
+  # Remaining agentless (caps / SUID / writable / supply-chain)
+  - id: file-cap
+    tactic: privilege
+    expect: file-capability-in-writable
+  - id: dangerous-cap
+    tactic: privilege
+    expect: dangerous-file-capability
+  - id: suid-shell
+    tactic: privilege
+    expect: suid-shell-escape-binary
+  - id: writable-suid
+    tactic: privilege
+    expect: writable-suid-binary
+  - id: world-writable
+    tactic: privilege
+    expect: world-writable-sensitive-file
+  - id: writable-persist
+    tactic: persistence
+    expect: writable-persistence-file
+  - id: login-shell
+    tactic: persistence
+    expect: login-shell-suspicious
+  - id: systemd-unit-ldpreload
+    tactic: evasion
+    expect: systemd-unit-ld-preload
+  - id: offensive-tool
+    tactic: discovery
+    expect: offensive-tool-on-disk
+  - id: liblzma-backdoor
+    tactic: supply-chain
+    expect: liblzma-xz-backdoor
+  - id: docker-socket
+    tactic: privilege
+    expect: docker-socket-exposed
+
+  # Wave #2: privileged (need root + a real host; skipped on the container, run via
+  # --target SSH). proc-bind-mount additionally needs SELinux permissive/off.
+  - id: immutable-file
+    tactic: evasion
+    expect: immutable-sensitive-file
+    requires: privileged
+  - id: binfmt-register
+    tactic: persistence
+    expect: binfmt-interpreter-writable
+    requires: privileged
+  - id: proc-bind-mount
+    tactic: evasion
+    expect: proc-bind-mount-hidden-process
+    requires: privileged
+  - id: core-pattern
+    tactic: privilege
+    expect: core-pattern-pipe-handler
+    requires: privileged
+  - id: yama-runtime
+    tactic: evasion
+    expect: yama-ptrace-scope-disabled
+    requires: privileged
+  # NOTE: dmesg-based rules (promiscuous-mode, exploit-segfault, out-of-tree-load)
+  # don't fit the plant->scan->clean->diff model — a kernel-log entry persists in the
+  # ring buffer (clean can't un-log it) and pollutes the baseline / a real host. They
+  # are covered by the collectors + unit tests instead. (The collectKernelLog tail fix
+  # came out of testing promiscuous-mode on a long-uptime host.)
+
+  # Benign-but-flagged NEGATIVES (calibrate ambiguous-rule precision)
+  - id: benign-sysctl-dev
+    tactic: evasion
+    expect: sysctl-hardening-disabled
+    label: false_positive
+  - id: benign-ci-docker
+    tactic: credential
+    expect: service-account-in-privileged-group
+    label: false_positive
+  - id: benign-dev-path
+    tactic: privilege
+    expect: path-hijack-entry
+    label: false_positive
+  - id: benign-home-service
+    tactic: persistence
+    expect: systemd-suspicious-execstart
+    label: false_positive
+  - id: benign-supervisor-port
+    tactic: network
+    expect: suspicious-port-listener
+    label: false_positive

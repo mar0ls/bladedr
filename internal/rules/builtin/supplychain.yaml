@@ -1,0 +1,29 @@
+id: liblzma-xz-backdoor
+title: "Backdoored xz/liblzma version (CVE-2024-3094)"
+category: file
+severity: critical
+score: 95
+mitre: ["T1195.001"]
+# The xz-utils supply-chain backdoor shipped in liblzma 5.6.0 and 5.6.1; it hooks
+# the OpenSSH RSA path via an IFUNC resolver in liblzma.
+foreach: lib_versions
+when: 'item.name == "liblzma" && (item.version.startsWith("5.6.0") || item.version.startsWith("5.6.1"))'
+evidence:
+  path: item.path
+  version: item.version
+dedup: ["item.path"]
+---
+id: package-repo-unverified
+title: "Package repo accepts unsigned packages (apt trusted=yes / dnf gpgcheck=0)"
+category: supply-chain
+severity: high
+score: 75
+mitre: ["T1195.001", "T1553"]
+# A repo with signature verification disabled lets an attacker (or a MITM) serve
+# malicious packages that install as root — the enabler behind malicious RPM/DNF/
+# DEB techniques. Collected from apt sources + yum/dnf repo configs.
+foreach: unverified_repos
+when: 'item != ""'
+evidence:
+  entry: item
+dedup: ["item"]

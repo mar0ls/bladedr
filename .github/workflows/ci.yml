@@ -1,0 +1,70 @@
+name: ci
+
+on:
+  push:
+    branches: [main, dev]
+    tags: ['v*']
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: '1.26'
+          cache: true
+      - name: gofmt
+        run: |
+          out=$(gofmt -l internal cmd)
+          if [ -n "$out" ]; then echo "unformatted:"; echo "$out"; exit 1; fi
+      - name: vet
+        run: go vet ./...
+      - name: build
+        run: go build ./...
+      - name: test
+        run: go test -race -coverprofile=coverage.out -covermode=atomic ./...
+      - name: upload coverage
+        uses: codecov/codecov-action@18283e04ce6e62d37312384ff67231eb8fd56d24 # v5
+        with:
+          files: coverage.out
+          fail_ci_if_error: false
+      - name: build linux probes
+        run: |
+          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build ./cmd/bladedr-probe
+          GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build ./cmd/bladedr-probe
+
+  semgrep:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - run: pipx install semgrep && semgrep --config auto --error --quiet
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v') && github.event.base_ref == 'refs/heads/main'
+    needs: [build, semgrep]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: '1.26'
+          cache: true
+      - name: build release artifacts
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -ldflags "-X main.version=${VERSION}" -o dist/bladedr-server.linux-amd64   ./cmd/bladedr-server
+          GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -ldflags "-X main.version=${VERSION}" -o dist/bladedr-server.linux-arm64   ./cmd/bladedr-server
+          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -ldflags "-X main.version=${VERSION}" -o dist/bladedr-probe.linux-amd64    ./cmd/bladedr-probe
+          GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -ldflags "-X main.version=${VERSION}" -o dist/bladedr-probe.linux-arm64    ./cmd/bladedr-probe
+          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -ldflags "-X main.version=${VERSION}" -o dist/bladedr-sensor.linux-amd64  ./cmd/bladedr-sensor
+          GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -ldflags "-X main.version=${VERSION}" -o dist/bladedr-sensor.linux-arm64  ./cmd/bladedr-sensor
+          cd dist && sha256sum * > SHA256SUMS
+      - name: create release
+        uses: softprops/action-gh-release@c95fe1489396fe8a9eb87c0abf8aa5b2ef267fda # v2
+        with:
+          generate_release_notes: true
+          files: dist/*

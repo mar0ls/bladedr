@@ -1,0 +1,56 @@
+id: pam-module-unusual-path
+title: "PAM module loaded from a non-standard path (PAM backdoor)"
+category: persistence
+severity: high
+score: 85
+mitre: ["T1556.003"]
+# Standard PAM modules are given by name (pam_unix.so), resolved from /lib/.../security.
+# An absolute path outside the standard dirs = an injected module (EDR-T6164).
+foreach: pam_modules
+when: >
+  item.path != "" &&
+  !item.path.startsWith("/lib/") && !item.path.startsWith("/usr/lib/") &&
+  !item.path.startsWith("/lib64/") && !item.path.startsWith("/usr/lib64/")
+evidence:
+  service: item.service
+  module: item.module
+  path: item.path
+dedup: ["item.service", "item.path"]
+---
+id: pam-exec-backdoor
+title: "PAM pam_exec/pam_python runs a script or logs the password (expose_authtok)"
+category: credential
+severity: critical
+score: 90
+mitre: ["T1556.003"]
+# pam_exec/pam_python run a command during authentication. expose_authtok feeds
+# the cleartext password to that command (credential theft); a script under a
+# writable path is a persistence/exec backdoor. Legit pam_exec is rare and uses
+# fixed system paths, so this stays low-FP.
+foreach: pam_modules
+when: >
+  (item.module == "pam_exec.so" || item.module == "pam_python.so") &&
+  (item.args.contains("expose_authtok") || item.args.contains("/tmp/") ||
+   item.args.contains("/dev/shm/") || item.args.contains("/var/tmp/") ||
+   item.args.contains("/home/"))
+evidence:
+  service: item.service
+  type: item.type
+  module: item.module
+  args: item.args
+dedup: ["item.service", "item.args"]
+---
+id: nsswitch-unusual-module
+title: "Non-standard NSS module in /etc/nsswitch.conf (possible libnss backdoor)"
+category: persistence
+severity: high
+score: 80
+mitre: ["T1556"]
+# A custom libnss_<name>.so referenced in nsswitch.conf is loaded into every
+# process doing name resolution. Standard modules (files/dns/systemd/sss/...) are
+# allowlisted by the collector, so only unexpected modules surface.
+foreach: nsswitch_unusual
+when: 'item != ""'
+evidence:
+  entry: item
+dedup: ["item"]

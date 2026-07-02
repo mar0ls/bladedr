@@ -1,0 +1,29 @@
+id: webshell-in-webroot
+title: "Webshell code pattern in a web-root file"
+category: persistence
+severity: critical
+score: 90
+mitre: ["T1505.003"]
+foreach: web_shells
+when: 'item.suspicious_lines.size() > 0'
+evidence:
+  path: item.path
+  lines: item.suspicious_lines
+dedup: ["item.path"]
+---
+id: web-server-module-writable
+title: "Web-server module loaded from a writable path (apache/nginx module backdoor)"
+category: persistence
+severity: high
+score: 80
+mitre: ["T1505.003"]
+# A module (LoadModule / load_module) runs inside the web server with its
+# privileges. The collector emits only modules whose path is in a writable dir
+# (/tmp, /dev/shm, /var/tmp, /home), so stock modules from /usr/lib don't FP.
+foreach: web_server_modules
+when: 'item.module != ""'
+evidence:
+  server: item.server
+  module: item.module
+  path: item.path
+dedup: ["item.path", "item.module"]

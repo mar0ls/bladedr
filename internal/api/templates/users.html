@@ -1,0 +1,68 @@
+{{define "content"}}
+<h1>Users <span class="pill">{{len .Users}}</span></h1>
+<p class="muted" style="margin:-.3rem 0 1rem">Admin-only. Roles: <b>admin</b> (full + user management),
+  <b>operator</b> (read + triage/scan/rules/sensor), <b>viewer</b> (read-only).</p>
+
+<details class="panel">
+  <summary>Add user</summary>
+  <div class="card">
+    <form class="toolbar" style="gap:.6rem" onsubmit="return addUser(event)">
+      <input id="nu" placeholder="username" autocomplete="off">
+      <input id="np" type="password" placeholder="password (≥8 chars)" autocomplete="new-password">
+      <select id="nr">
+        <option value="viewer">viewer</option>
+        <option value="operator">operator</option>
+        <option value="admin">admin</option>
+      </select>
+      <button class="primary" type="submit">Create</button>
+      <span id="umsg" class="muted"></span>
+    </form>
+  </div>
+</details>
+
+<div class="card">
+<table>
+  <thead><tr><th>username</th><th>role</th><th>state</th><th>created</th><th>actions</th></tr></thead>
+  <tbody>
+  {{range .Users}}
+    <tr>
+      <td><b>{{.Username}}</b>{{if eq .ID $.CurrentID}} <span class="muted">(you)</span>{{end}}</td>
+      <td>
+        <select onchange="setRole('{{.ID}}',this.value)">
+          <option value="viewer"{{if eq .Role "viewer"}} selected{{end}}>viewer</option>
+          <option value="operator"{{if eq .Role "operator"}} selected{{end}}>operator</option>
+          <option value="admin"{{if eq .Role "admin"}} selected{{end}}>admin</option>
+        </select>
+      </td>
+      <td>{{if .Disabled}}<span class="muted">disabled</span>{{else}}<span class="status-dot ok"></span>active{{end}}</td>
+      <td class="muted">{{.CreatedAt.Format "2006-01-02"}}</td>
+      <td>
+        {{if .Disabled}}<button onclick="setDisabled('{{.ID}}',false)">Enable</button>
+        {{else}}<button onclick="setDisabled('{{.ID}}',true)">Disable</button>{{end}}
+        <button onclick="resetPw('{{.ID}}','{{.Username}}')">Reset pw</button>
+        {{if ne .ID $.CurrentID}}<button class="danger" onclick="delUser('{{.ID}}','{{.Username}}')">Delete</button>{{end}}
+      </td>
+    </tr>
+  {{end}}
+  </tbody>
+</table>
+</div>
+
+<script>
+function addUser(e){
+  e.preventDefault();
+  var body={Username:document.getElementById('nu').value,Password:document.getElementById('np').value,Role:document.getElementById('nr').value};
+  fetch('/api/v1/users',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
+    .then(function(r){return r.ok?location.reload():r.text().then(function(t){document.getElementById('umsg').textContent=t});});
+  return false;
+}
+function patchUser(id,body){
+  return fetch('/api/v1/users/'+id,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
+    .then(function(r){if(r.ok)location.reload();else r.text().then(function(t){alert(t)});});
+}
+function setRole(id,role){patchUser(id,{role:role});}
+function setDisabled(id,d){patchUser(id,{disabled:d});}
+function resetPw(id,name){var p=prompt('New password for '+name+' (≥8 chars):');if(p)patchUser(id,{password:p});}
+function delUser(id,name){if(confirm('Delete user '+name+'?'))fetch('/api/v1/users/'+id,{method:'DELETE'}).then(function(r){if(r.ok||r.status==204)location.reload();else alert('failed');});}
+</script>
+{{end}}

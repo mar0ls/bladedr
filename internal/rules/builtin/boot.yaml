@@ -1,0 +1,71 @@
+id: udev-run-backdoor
+title: "udev rule runs a program from a writable path / shell (persistence)"
+category: persistence
+severity: high
+score: 80
+mitre: ["T1546"]
+foreach: udev_rules
+when: >
+  item.rule.contains("/tmp/") || item.rule.contains("/dev/shm/") || item.rule.contains("/var/tmp/") ||
+  item.rule.contains("/bin/sh") || item.rule.contains("bash -") || item.rule.contains("nc ")
+evidence:
+  path: item.path
+  rule: item.rule
+dedup: ["item.path", "item.rule"]
+---
+id: binfmt-interpreter-writable
+title: "binfmt_misc interpreter from a writable path (shadow execution)"
+category: persistence
+severity: high
+score: 80
+mitre: ["T1546"]
+foreach: binfmt_entries
+when: >
+  item.interpreter.startsWith("/tmp/") || item.interpreter.startsWith("/dev/shm/") ||
+  item.interpreter.startsWith("/var/tmp/") || item.interpreter.startsWith("/home/")
+evidence:
+  name: item.name
+  interpreter: item.interpreter
+dedup: ["item.name"]
+---
+id: startup-script-cradle
+title: "Startup script contains a download cradle / reverse shell"
+category: persistence
+severity: high
+score: 75
+mitre: ["T1037.004"]
+foreach: startup_scripts
+when: 'item.suspicious_lines.size() > 0'
+evidence:
+  path: item.path
+  lines: item.suspicious_lines
+dedup: ["item.path"]
+---
+id: at-job-cradle
+title: "at(1) job contains a download cradle / reverse shell"
+category: persistence
+severity: high
+score: 75
+mitre: ["T1053.002"]
+foreach: at_jobs
+when: 'item.suspicious_lines.size() > 0'
+evidence:
+  path: item.path
+  lines: item.suspicious_lines
+dedup: ["item.path"]
+---
+id: initramfs-hook-cradle
+title: "initramfs/dracut hook contains a download cradle / reverse shell (boot persistence)"
+category: persistence
+severity: high
+score: 80
+mitre: ["T1542.001", "T1037"]
+# A hook/script under /etc/initramfs-tools, /usr/share/initramfs-tools/hooks or a
+# dracut config that runs a cradle/reverse-shell is baked into the initrd and runs
+# as root at every boot (pre-disk). Distro dracut module trees are excluded upstream.
+foreach: initramfs_hooks
+when: 'item.suspicious_lines.size() > 0'
+evidence:
+  path: item.path
+  lines: item.suspicious_lines
+dedup: ["item.path"]

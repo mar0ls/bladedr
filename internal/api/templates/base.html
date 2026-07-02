@@ -1,0 +1,98 @@
+{{define "base"}}<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>bladedr — {{.Title}}</title>
+<style>
+  :root{
+    color-scheme:dark;
+    --bg:#0b0e14; --panel:#11151d; --panel2:#161b25; --border:#1f2733;
+    --text:#d7dee8; --muted:#7c8696; --faint:#586173;
+    --accent:#5aa2ff; --accent-bg:#1b3a63; --green:#3fb950; --red:#f0506e;
+    --orange:#e08a3c; --yellow:#d9a72a;
+    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Inter,system-ui,sans-serif;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:var(--sans);font-size:14px;line-height:1.5;background:var(--bg);color:var(--text)}
+  a{color:var(--accent);text-decoration:none} a:hover{text-decoration:underline}
+  header.topbar{position:sticky;top:0;z-index:10;display:flex;align-items:center;gap:1.5rem;
+    padding:.7rem 1.4rem;background:rgba(13,17,24,.85);backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--border)}
+  .brand{display:flex;align-items:center}
+  .brand img{display:block}
+  nav.nav{display:flex;gap:.3rem}
+  nav.nav a{color:var(--muted);padding:.35rem .8rem;border-radius:8px;font-weight:500}
+  nav.nav a:hover{background:var(--panel2);color:var(--text);text-decoration:none}
+  nav.nav a.active{background:var(--accent-bg);color:#cfe2ff}
+  main{padding:1.4rem;max-width:1500px;margin:0 auto}
+  h1{font-size:1.3rem;margin:.2rem 0 1rem;font-weight:700}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;
+    padding:1rem 1.1rem;margin-bottom:1.1rem;box-shadow:0 1px 3px rgba(0,0,0,.3)}
+  .toolbar{display:flex;flex-wrap:wrap;gap:.5rem;align-items:center}
+  input,select,textarea{background:var(--bg);color:var(--text);border:1px solid var(--border);
+    border-radius:8px;padding:.45rem .6rem;font:inherit;font-family:var(--sans)}
+  input:focus,select:focus,textarea:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px #5aa2ff33}
+  input[type=search]{min-width:20rem}
+  textarea{font-family:var(--mono);font-size:13px}
+  label.fld{display:flex;flex-direction:column;gap:.25rem;font-size:12px;color:var(--muted)}
+  button,.btn{background:var(--panel2);color:var(--text);border:1px solid var(--border);
+    border-radius:8px;padding:.45rem .8rem;cursor:pointer;font:inherit;font-weight:500;transition:.12s}
+  button:hover,.btn:hover{border-color:var(--accent);color:#cfe2ff}
+  button.primary{background:#1f7a34;border-color:#2ea043;color:#fff}
+  button.primary:hover{background:#2ea043;color:#fff}
+  button.danger:hover{border-color:var(--red);color:#ff8aa0}
+  button:disabled{opacity:.55;cursor:default}
+  .count,.muted{color:var(--muted)}
+  .faint{color:var(--faint)}
+  table{width:100%;border-collapse:collapse;font-size:13.5px}
+  thead th{text-align:left;padding:.55rem .7rem;color:var(--muted);font-weight:600;font-size:11.5px;
+    text-transform:uppercase;letter-spacing:.04em;border-bottom:1px solid var(--border);
+    position:sticky;top:53px;background:var(--panel)}
+  tbody td{padding:.6rem .7rem;border-bottom:1px solid #161c26;vertical-align:top}
+  tbody tr:hover td{background:var(--panel2)}
+  .badge{display:inline-block;padding:.08rem .5rem;border-radius:20px;font-size:11.5px;font-weight:700;font-family:var(--sans)}
+  .sev-critical{background:#f0506e22;color:#ff8097;border:1px solid #f0506e55}
+  .sev-high{background:#e08a3c22;color:#f0a85f;border:1px solid #e08a3c55}
+  .sev-medium{background:#d9a72a22;color:#e6c24d;border:1px solid #d9a72a55}
+  .sev-low{background:#5868781f;color:#9aa6b6;border:1px solid #3a424f}
+  .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:.4rem;vertical-align:middle}
+  .st-online,.st-ok{color:var(--green)} .st-online .dot{background:var(--green)}
+  .st-pending{color:var(--yellow)} .st-pending .dot{background:var(--yellow)}
+  .st-unreachable,.st-failed{color:var(--red)} .st-unreachable .dot{background:var(--red)}
+  .st-disabled{color:var(--muted)} .st-disabled .dot{background:var(--muted)}
+  .obs-open{color:#ff8097}.obs-acknowledged{color:#e6c24d}.obs-resolved{color:#3fb950}.obs-false_positive{color:var(--muted)}
+  .ev{color:var(--muted);font-family:var(--mono);font-size:12.5px;max-width:40rem;word-break:break-word}
+  .tag{background:#1b3a6355;color:#9cc4ff;border-radius:6px;padding:.05rem .4rem;margin:0 .15rem .15rem 0;
+    display:inline-block;font-size:12px;font-family:var(--mono)}
+  .act{white-space:nowrap}.act button{padding:.25rem .55rem;font-size:12.5px;margin-right:.25rem}
+  details.panel{margin-bottom:1.1rem}
+  details.panel>summary{cursor:pointer;color:var(--accent);font-weight:600;list-style:none;padding:.3rem 0}
+  details.panel>summary::before{content:"+ ";font-weight:700}
+  details.panel[open]>summary::before{content:"– "}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:.6rem}
+  .empty{color:var(--muted);padding:2.5rem;text-align:center;font-size:1rem}
+  .pill{font-size:12px;color:var(--muted);background:var(--panel2);border:1px solid var(--border);border-radius:20px;padding:.1rem .6rem}
+</style>
+</head>
+<body>
+<header class="topbar">
+  <a href="/ui/dashboard" class="brand"><img src="/ui/logo.png" alt="bladedr" height="34"></a>
+  <nav class="nav">
+    <a href="/ui/dashboard"{{if eq .Nav "dash"}} class="active"{{end}}>Overview</a>
+    <a href="/ui/observations"{{if eq .Nav "obs"}} class="active"{{end}}>Findings</a>
+    <a href="/ui/hosts"{{if eq .Nav "hosts"}} class="active"{{end}}>Hosts</a>
+    <a href="/ui/schedules"{{if eq .Nav "sched"}} class="active"{{end}}>Schedules</a>
+    <a href="/ui/rules"{{if eq .Nav "rules"}} class="active"{{end}}>Rules</a>
+    {{if .IsAdmin}}<a href="/ui/users"{{if eq .Nav "users"}} class="active"{{end}}>Users</a>
+    <a href="/ui/audit"{{if eq .Nav "audit"}} class="active"{{end}}>Audit</a>{{end}}
+  </nav>
+  <span style="margin-left:auto;display:flex;align-items:center;gap:.6rem">
+    {{if .CurrentUser}}<span class="muted" title="role: {{.Role}}">{{.CurrentUser}} · {{.Role}}</span>
+      <button onclick="fetch('/api/v1/logout',{method:'POST'}).then(function(){location.href='/ui/login'})">Logout</button>{{end}}
+  </span>
+</header>
+<main>{{block "content" .}}{{end}}</main>
+</body>
+</html>{{end}}
