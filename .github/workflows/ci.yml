@@ -9,6 +9,19 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: paradedb/paradedb:latest
+        env:
+          POSTGRES_USER: bladedr
+          POSTGRES_PASSWORD: bladedr
+          POSTGRES_DB: bladedr
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
@@ -24,11 +37,14 @@ jobs:
       - name: build
         run: go build ./...
       - name: test
-        run: go test -race -coverprofile=coverage.out -covermode=atomic ./...
+        env:
+          BLADEDR_DATABASE_URL: postgres://bladedr:bladedr@localhost:5432/bladedr
+        run: go test -race -coverprofile=coverage.out -covermode=atomic -coverpkg=./internal/... ./...
       - name: upload coverage
         uses: codecov/codecov-action@18283e04ce6e62d37312384ff67231eb8fd56d24 # v5
         with:
           files: coverage.out
+          token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
       - name: build linux probes
         run: |
