@@ -58,7 +58,7 @@ jobs:
       - run: pipx install semgrep && semgrep --config auto --error --quiet
 
   release:
-    if: startsWith(github.ref, 'refs/tags/v') && github.event.base_ref == 'refs/heads/main'
+    if: startsWith(github.ref, 'refs/tags/v')
     needs: [build, semgrep]
     runs-on: ubuntu-latest
     permissions:
