@@ -2,6 +2,13 @@
   <img src="assets/logo.png" alt="bladedr" width="460">
 </p>
 
+<p align="center">
+  <a href="https://github.com/mar0ls/bladedr/actions/workflows/ci.yml"><img src="https://github.com/mar0ls/bladedr/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://codecov.io/gh/mar0ls/bladedr"><img src="https://codecov.io/gh/mar0ls/bladedr/graph/badge.svg" alt="Coverage"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0-blue" alt="License"></a>
+  <img src="https://img.shields.io/badge/go-1.26-00ADD8" alt="Go">
+</p>
+
 Agentless threat detection and response for Linux, with an optional eBPF tier.
 The agentless model is Sandfly-style; the eBPF tier wraps Tetragon. Independent
 implementation, not a fork.
