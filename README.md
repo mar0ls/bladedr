@@ -218,6 +218,22 @@ Credentials are sealed with a Curve25519 key (NaCl sealed box); only the node ke
 (`BLADEDR_NODE_KEY`) decrypts them, so the DB never holds usable secrets. Secrets are
 write-only via the API. SSH host keys are pinned on first use.
 
+### What "agentless" means here
+
+Nothing runs on the hosts between scans. A scan opens an SSH session, uploads a static
+probe binary to `/tmp/.bladedr/` (`chmod 0700`, cached by content hash so repeat scans
+skip the upload), runs it, and it exits. The probe reads a `/proc` snapshot, evaluates
+the rules locally, and prints JSON — no daemon, no package, no kernel module, nothing
+left running. It runs as whatever SSH user you point it at; root only gives it more of
+`/proc` to read, it isn't required. The exception is the optional eBPF sensor, which
+does need root (Tetragon) and is opt-in per host.
+
+The trade-off is that one server holds SSH access to the fleet, which makes it a
+target. Two things stop the database alone from being enough: credentials are sealed
+with a box that only `BLADEDR_NODE_KEY` opens (and that key lives in the process env,
+not the DB), and host keys are pinned on first use. If you don't need root-level
+collection, point scans at a least-privilege SSH user.
+
 ```sh
 ./bin/bladedr-server -keygen           # mint BLADEDR_NODE_KEY
 curl -X POST :8080/api/v1/credentials -d '{"username":"root","auth_type":"ssh_key","secret":"<PEM>"}'
