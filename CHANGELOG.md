@@ -3,7 +3,7 @@
 Notable changes. Format loosely follows [Keep a Changelog](https://keepachangelog.com);
 versions follow [SemVer](https://semver.org).
 
-## [Unreleased]
+## [0.8.0] - 2026-07-10
 
 ### Added
 - TLS: serve HTTPS from `BLADEDR_TLS_CERT`/`BLADEDR_TLS_KEY` (min TLS 1.2); the session
