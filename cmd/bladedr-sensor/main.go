@@ -27,18 +27,26 @@ import (
 	"bladedr/internal/store"
 )
 
+// version is overridden at release build time via -ldflags "-X main.version=...".
+var version = "dev"
+
 func main() {
 	var (
-		server     = flag.String("server", "http://localhost:8080", "bladedr control-plane base URL")
-		hostID     = flag.String("host-id", "", "this host's bladedr id (required unless --dry-run)")
-		policyDir  = flag.String("policy-dir", "linux-probe-shield", "Tetragon TracingPolicy bundle dir")
-		tetragon   = flag.String("tetragon", "tetragon", "tetragon binary path")
-		exportFile = flag.String("export-file", "", "follow an existing Tetragon JSON export instead of launching tetragon")
-		interval   = flag.Duration("interval", 5*time.Second, "how often to flush a batch of observations")
-		token      = flag.String("token", "", "ingest bearer token (BLADEDR_INGEST_TOKEN on the server)")
-		dryRun     = flag.Bool("dry-run", false, "print observations instead of posting")
+		server      = flag.String("server", "http://localhost:8080", "bladedr control-plane base URL")
+		hostID      = flag.String("host-id", "", "this host's bladedr id (required unless --dry-run)")
+		policyDir   = flag.String("policy-dir", "linux-probe-shield", "Tetragon TracingPolicy bundle dir")
+		tetragon    = flag.String("tetragon", "tetragon", "tetragon binary path")
+		exportFile  = flag.String("export-file", "", "follow an existing Tetragon JSON export instead of launching tetragon")
+		interval    = flag.Duration("interval", 5*time.Second, "how often to flush a batch of observations")
+		token       = flag.String("token", "", "ingest bearer token (BLADEDR_INGEST_TOKEN on the server)")
+		dryRun      = flag.Bool("dry-run", false, "print observations instead of posting")
+		showVersion = flag.Bool("version", false, "print version and exit")
 	)
 	flag.Parse()
+	if *showVersion {
+		fmt.Println(version)
+		return
+	}
 	if *token == "" {
 		*token = os.Getenv("BLADEDR_INGEST_TOKEN")
 	}
@@ -47,7 +55,7 @@ func main() {
 	if err != nil {
 		fatal("load policies: " + err.Error())
 	}
-	fmt.Fprintf(os.Stderr, "bladedr-sensor: loaded %d policies from %s\n", len(meta), *policyDir)
+	fmt.Fprintf(os.Stderr, "bladedr-sensor %s: loaded %d policies from %s\n", version, len(meta), *policyDir)
 	if *hostID == "" && !*dryRun {
 		fatal("missing --host-id")
 	}
@@ -124,33 +132,39 @@ func follow(f *os.File) io.Reader {
 func flusher(ch <-chan *store.Observation, server, hostID, token string, interval time.Duration, dryRun bool) {
 	t := time.NewTicker(interval)
 	defer t.Stop()
-	var batch []*store.Observation
-	flush := func() {
-		if len(batch) == 0 {
-			return
-		}
+	buf := &eventBuffer{}
+	send := func(batch []*store.Observation) error {
 		if dryRun {
 			for _, o := range batch {
 				fmt.Printf("[%s] %s %s %v\n", o.Severity, o.RuleID, o.Evidence["binary"], o.Mitre)
 			}
-		} else if err := post(server, hostID, token, batch); err != nil {
-			fmt.Fprintln(os.Stderr, "bladedr-sensor: post:", err)
+			return nil
 		}
-		batch = batch[:0]
+		if err := post(server, hostID, token, batch); err != nil {
+			// Logged here (not in flush) so the backoff naturally throttles the noise:
+			// while backing off, flush returns without calling send.
+			fmt.Fprintf(os.Stderr, "bladedr-sensor: post failed, %d event(s) buffered: %v\n", len(buf.pending), err)
+			return err
+		}
+		return nil
 	}
 	for {
 		select {
 		case o, ok := <-ch:
 			if !ok {
-				flush()
+				buf.flush(time.Now(), send)
 				return
 			}
-			batch = append(batch, o)
-			if len(batch) >= 256 {
-				flush()
+			buf.add(o)
+			if len(buf.pending) >= maxPostBatch {
+				buf.flush(time.Now(), send)
 			}
 		case <-t.C:
-			flush()
+			buf.flush(time.Now(), send)
+			if buf.dropped > 0 {
+				fmt.Fprintf(os.Stderr, "bladedr-sensor: buffer full, dropped %d oldest event(s)\n", buf.dropped)
+				buf.dropped = 0
+			}
 		}
 	}
 }

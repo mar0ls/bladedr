@@ -8,11 +8,13 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -28,13 +30,23 @@ import (
 	"bladedr/internal/rules"
 	"bladedr/internal/scan"
 	"bladedr/internal/secrets"
+	"bladedr/internal/sensor"
 	"bladedr/internal/store"
 )
 
+// version is overridden at release build time via -ldflags "-X main.version=...".
+var version = "dev"
+
 func main() {
+	setupLogging()
 	keygen := flag.Bool("keygen", false, "generate a node keypair (for BLADEDR_NODE_KEY) and exit")
 	dumpBundle := flag.Bool("dump-bundle", false, "print the builtin rule bundle (probe --rules input) and exit")
+	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
+	if *showVersion {
+		fmt.Println(version)
+		return
+	}
 	if *dumpBundle {
 		rs, err := loadRules()
 		if err != nil {
@@ -93,6 +105,15 @@ func main() {
 		return rules.Merge(baseRules, dbRules), nil
 	}
 
+	// BLADEDR_INGEST_TOKEN may be a comma-separated list to rotate without downtime:
+	// the API accepts any listed token, while sensors are deployed with the primary
+	// (first) one.
+	ingestTokens := os.Getenv("BLADEDR_INGEST_TOKEN")
+	primaryIngestToken := ingestTokens
+	if i := strings.IndexByte(ingestTokens, ','); i >= 0 {
+		primaryIngestToken = strings.TrimSpace(ingestTokens[:i])
+	}
+
 	runner := &scan.Runner{
 		Store:              st,
 		LoadRules:          loadActiveRules,
@@ -100,7 +121,7 @@ func main() {
 		SensorBins:         loadSensorBinaries(),
 		PolicyTar:          loadPolicyTar(),
 		ServerURL:          os.Getenv("BLADEDR_SERVER_URL"),
-		IngestToken:        os.Getenv("BLADEDR_INGEST_TOKEN"),
+		IngestToken:        primaryIngestToken,
 		NewSensorTransport: sensorTransportFactory(ctx, st, crypto, loadProbeBinaries()),
 	}
 
@@ -108,15 +129,30 @@ func main() {
 	scheduler := &scan.Scheduler{Store: st, Runner: runner, Tick: schedulerTick(), ScanTimeout: scanTimeout()}
 	go scheduler.Run(ctx)
 
+	// Session housekeeping: expired sessions are already rejected on use, but this
+	// sweeps them so the store doesn't accumulate dead rows.
+	go pruneSessions(ctx, st)
+
 	riskDataset := os.Getenv("BLADEDR_RISK_DATASET")
 	if riskDataset == "" {
 		riskDataset = "poligon/dataset.jsonl"
 	}
+	tlsCert, tlsKey := os.Getenv("BLADEDR_TLS_CERT"), os.Getenv("BLADEDR_TLS_KEY")
+	tlsOn := tlsCert != "" && tlsKey != ""
+	// Serving over TLS implies the session cookie can carry the Secure flag; enable it
+	// automatically so operators don't have to remember the separate env var (they can
+	// still force it on a plaintext LAN with BLADEDR_SECURE_COOKIES).
+	secureCookies := tlsOn || os.Getenv("BLADEDR_SECURE_COOKIES") == "1" || os.Getenv("BLADEDR_SECURE_COOKIES") == "true"
+
 	a := &api.API{Store: st, Runner: runner, Crypto: crypto, ActiveRules: loadActiveRules, RiskDataset: riskDataset,
 		RiskAugment:   os.Getenv("BLADEDR_RISK_AUGMENT") == "1" || os.Getenv("BLADEDR_RISK_AUGMENT") == "true",
-		IngestToken:   os.Getenv("BLADEDR_INGEST_TOKEN"),
-		SecureCookies: os.Getenv("BLADEDR_SECURE_COOKIES") == "1" || os.Getenv("BLADEDR_SECURE_COOKIES") == "true"}
+		IngestToken:   ingestTokens,
+		SecureCookies: secureCookies,
+		Policies:      loadPolicyMeta()}
 	srv := &http.Server{Addr: addr, Handler: a.Routes(), ReadHeaderTimeout: 10 * time.Second}
+	if tlsOn {
+		srv.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+	}
 
 	// Graceful shutdown: on SIGINT/SIGTERM stop accepting and drain in flight.
 	go func() {
@@ -127,10 +163,51 @@ func main() {
 		_ = srv.Shutdown(sctx)
 	}()
 
-	log.Printf("bladedr-server listening on %s", addr)
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	if tlsOn {
+		log.Printf("bladedr-server %s listening on %s (TLS)", version, addr)
+		err = srv.ListenAndServeTLS(tlsCert, tlsKey)
+	} else {
+		log.Printf("bladedr-server %s listening on %s (plaintext — set BLADEDR_TLS_CERT/KEY for HTTPS; do not expose beyond a trusted LAN)", version, addr)
+		err = srv.ListenAndServe()
+	}
+	if err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
 	}
+}
+
+// pruneSessions periodically deletes expired sessions until ctx is cancelled.
+func pruneSessions(ctx context.Context, st store.Store) {
+	t := time.NewTicker(time.Hour)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			if n, err := st.DeleteExpiredSessions(ctx); err != nil {
+				log.Printf("session prune: %v", err)
+			} else if n > 0 {
+				log.Printf("pruned %d expired session(s)", n)
+			}
+		}
+	}
+}
+
+// setupLogging installs slog as the default logger (text by default, JSON with
+// BLADEDR_LOG_FORMAT=json for log aggregators; debug via BLADEDR_LOG_LEVEL=debug).
+// slog.SetDefault also routes the standard log package through the same handler, so
+// existing log.Printf lifecycle messages come out structured too.
+func setupLogging() {
+	level := slog.LevelInfo
+	if strings.EqualFold(os.Getenv("BLADEDR_LOG_LEVEL"), "debug") {
+		level = slog.LevelDebug
+	}
+	opts := &slog.HandlerOptions{Level: level}
+	var h slog.Handler = slog.NewTextHandler(os.Stderr, opts)
+	if strings.EqualFold(os.Getenv("BLADEDR_LOG_FORMAT"), "json") {
+		h = slog.NewJSONHandler(os.Stderr, opts)
+	}
+	slog.SetDefault(slog.New(h))
 }
 
 // transportFactory picks SSH (when the host has a credential + IP) or the local
@@ -274,6 +351,26 @@ func loadSensorBinaries() map[string][]byte {
 		}
 	}
 	return bins
+}
+
+// loadPolicyMeta parses the TracingPolicy catalog from BLADEDR_POLICY_DIR for the
+// UI's Policies page. Nil when the dir is unset or unreadable — the page then shows
+// an empty state instead of failing.
+func loadPolicyMeta() []sensor.PolicyMeta {
+	dir := os.Getenv("BLADEDR_POLICY_DIR")
+	if dir == "" {
+		return nil
+	}
+	meta, err := sensor.LoadPolicyMeta(dir)
+	if err != nil {
+		log.Printf("policy metadata: %v", err)
+		return nil
+	}
+	out := make([]sensor.PolicyMeta, 0, len(meta))
+	for _, m := range meta {
+		out = append(out, m)
+	}
+	return out
 }
 
 // loadPolicyTar gzip-tars the TracingPolicy bundle from BLADEDR_POLICY_DIR so the

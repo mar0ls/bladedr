@@ -885,3 +885,15 @@ func (p *Postgres) ListAudit(ctx context.Context, limit int) ([]*AuditEvent, err
 	}
 	return out, rows.Err()
 }
+
+// Ping verifies the connection pool can reach the database.
+func (p *Postgres) Ping(ctx context.Context) error { return p.pool.Ping(ctx) }
+
+// DeleteExpiredSessions removes sessions whose expiry has passed.
+func (p *Postgres) DeleteExpiredSessions(ctx context.Context) (int, error) {
+	ct, err := p.pool.Exec(ctx, `DELETE FROM sessions WHERE expires_at < now()`)
+	if err != nil {
+		return 0, err
+	}
+	return int(ct.RowsAffected()), nil
+}

@@ -36,3 +36,6 @@ Thumbs.db
 *~
 .idea/
 .vscode/
+/bladedr-probe
+/bladedr-server
+/bladedr-sensor

@@ -33,8 +33,9 @@ type API struct {
 	// RiskAugment, when true, class-balances the scorer's training set via synthetic
 	// augmentation (scoring only — never the Evaluate CV, which would leak).
 	RiskAugment bool
-	// IngestToken is a machine-to-machine bearer token the eBPF sensors use to POST
-	// events (no user session). Empty disables token-based ingest (then an operator
+	// IngestToken is the machine-to-machine bearer token(s) the eBPF sensors use to
+	// POST events (no user session). May be a comma-separated list so a token can be
+	// rotated with no downtime. Empty disables token-based ingest (then an operator
 	// session is required like any other write).
 	IngestToken string
 	// SecureCookies marks the session cookie Secure (HTTPS-only). Enable behind TLS.
@@ -42,11 +43,22 @@ type API struct {
 	// Policies is the eBPF TracingPolicy catalog the sensor ships (from
 	// BLADEDR_POLICY_DIR), shown in the UI so operators can see runtime coverage.
 	Policies []sensor.PolicyMeta
+
+	loginLimiter *loginLimiter // per-IP login throttle, initialised by Routes
+	metrics      *metrics      // HTTP metrics collector, initialised by Routes
 }
 
 func (a *API) Routes() http.Handler {
+	if a.loginLimiter == nil {
+		a.loginLimiter = newLoginLimiter()
+	}
+	if a.metrics == nil {
+		a.metrics = newMetrics()
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", a.health)
+	mux.HandleFunc("GET /readyz", a.readyz)
+	mux.HandleFunc("GET /metrics", a.serveMetrics)
 	mux.HandleFunc("GET /api/v1/hosts", a.listHosts)
 	mux.HandleFunc("POST /api/v1/hosts", a.createHost)
 	mux.HandleFunc("GET /api/v1/hosts/{id}", a.getHost)
@@ -100,8 +112,9 @@ func (a *API) Routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/audit", a.listAudit)
 	a.registerUI(mux)
 	// Every route except the public ones (login, healthz, login page) requires an
-	// authenticated session; mutations and admin areas are gated by role (RBAC).
-	return a.authMiddleware(mux)
+	// authenticated session; mutations and admin areas are gated by role (RBAC). The
+	// outer observe wrapper records metrics + access logs for all requests.
+	return a.observe(a.authMiddleware(mux))
 }
 
 func (a *API) health(w http.ResponseWriter, _ *http.Request) {
