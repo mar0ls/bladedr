@@ -740,3 +740,21 @@ func (m *Memory) ListAudit(_ context.Context, limit int) ([]*AuditEvent, error) 
 	}
 	return out, nil
 }
+
+// Ping always succeeds for the in-memory store.
+func (m *Memory) Ping(_ context.Context) error { return nil }
+
+// DeleteExpiredSessions removes sessions whose expiry has passed.
+func (m *Memory) DeleteExpiredSessions(_ context.Context) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	now := time.Now()
+	n := 0
+	for tok, s := range m.sessions {
+		if now.After(s.ExpiresAt) {
+			delete(m.sessions, tok)
+			n++
+		}
+	}
+	return n, nil
+}

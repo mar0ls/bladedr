@@ -26,12 +26,14 @@ run: build ## Run the server (in-memory store) on :8080
 demo: build ## Run an end-to-end demo scan against the bundled malicious snapshot
 	@BLADEDR_ADDR=:18080 BLADEDR_PROBE_BIN=./$(BIN)/bladedr-probe \
 	  BLADEDR_PROBE_EXTRA="--snapshot-file testdata/malicious-snapshot.json" \
+	  BLADEDR_ADMIN_PASSWORD=demo \
 	  ./$(BIN)/bladedr-server >/tmp/bladedr-demo.log 2>&1 & \
 	  sleep 1; \
-	  HID=$$(curl -fsS -X POST localhost:18080/api/v1/hosts -H 'content-type: application/json' -d '{"hostname":"web-01","primary_ip":"10.0.0.5"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])'); \
-	  curl -fsS -X POST localhost:18080/api/v1/hosts/$$HID/scans | python3 -m json.tool; \
+	  TOK=$$(curl -fsS -X POST localhost:18080/api/v1/login -H 'content-type: application/json' -d '{"Username":"admin","Password":"demo"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])'); \
+	  HID=$$(curl -fsS -H "Authorization: Bearer $$TOK" -X POST localhost:18080/api/v1/hosts -H 'content-type: application/json' -d '{"hostname":"web-01","primary_ip":"10.0.0.5"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])'); \
+	  curl -fsS -H "Authorization: Bearer $$TOK" -X POST localhost:18080/api/v1/hosts/$$HID/scans | python3 -m json.tool; \
 	  echo "--- observations ---"; \
-	  curl -fsS "localhost:18080/api/v1/observations?host=$$HID" | python3 -m json.tool; \
+	  curl -fsS -H "Authorization: Bearer $$TOK" "localhost:18080/api/v1/observations?host=$$HID" | python3 -m json.tool; \
 	  pkill -f bladedr-server
 
 deploy: ## Deploy the control plane on this machine (Postgres + persistent key + server)

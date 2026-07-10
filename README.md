@@ -68,11 +68,13 @@ curl "localhost:8080/api/v1/observations?q=rootkit"   # BM25 text search on Post
 
 ## Storage
 
-In-memory by default. For Postgres:
+In-memory by default. For Postgres, point `BLADEDR_DATABASE_URL` at a ParadeDB
+instance — the server applies the embedded, versioned migrations on startup (tracked
+in `schema_migrations`, so each runs once):
 
 ```sh
 docker compose up -d
-psql "postgres://bladedr:bladedr@localhost:5432/bladedr" -f internal/store/migrations/0001_init.sql
+BLADEDR_DATABASE_URL=postgres://bladedr:bladedr@localhost:5432/bladedr ./bin/bladedr-server
 ```
 
 ## Config
@@ -88,8 +90,12 @@ psql "postgres://bladedr:bladedr@localhost:5432/bladedr" -f internal/store/migra
 | `BLADEDR_PROBE_LINUX_AMD64` | – | linux/amd64 probe path (SSH scanning) |
 | `BLADEDR_PROBE_LINUX_ARM64` | – | linux/arm64 probe path (SSH scanning) |
 | `BLADEDR_ADMIN_PASSWORD` | (generated) | initial admin password |
-| `BLADEDR_INGEST_TOKEN` | – | shared bearer token sensors use to post events |
-| `BLADEDR_SECURE_COOKIES` | `false` | set the `Secure` flag on session cookies (needs TLS) |
+| `BLADEDR_INGEST_TOKEN` | – | bearer token sensors use to post events; comma-separated to rotate without downtime (server accepts any, sensors get the first) |
+| `BLADEDR_TLS_CERT` | – | PEM cert path; with `_KEY` serves HTTPS and auto-sets Secure cookies |
+| `BLADEDR_TLS_KEY` | – | PEM private key path (pairs with `BLADEDR_TLS_CERT`) |
+| `BLADEDR_SECURE_COOKIES` | `false` | force the `Secure` flag on session cookies (implied by TLS) |
+| `BLADEDR_LOG_FORMAT` | `text` | `json` for structured logs (log aggregators) |
+| `BLADEDR_LOG_LEVEL` | `info` | `debug` to include health/metrics scrapes and detail |
 
 ## Deploy
 
@@ -99,6 +105,13 @@ The server runs anywhere; scan targets are always Linux (over SSH).
 docker build -t bladedr-server .
 docker run -p 8080:8080 -e BLADEDR_DATABASE_URL=... -e BLADEDR_NODE_KEY=... bladedr-server
 ```
+
+Running it for real (TLS, systemd, Postgres, backups, hardening): see
+[docs/deployment.md](docs/deployment.md).
+
+Operational endpoints (unauthenticated, for probes/scrapers): `GET /healthz`
+(liveness), `GET /readyz` (readiness — checks the store is reachable), `GET /metrics`
+(Prometheus text: request counts by method/status + a latency summary).
 
 Detection coverage vs the Linux ATT&CK / EDR-T matrix: [COVERAGE.md](COVERAGE.md).
 
@@ -209,8 +222,10 @@ curl -X POST :8080/api/v1/login -d '{"Username":"admin","Password":"…"}'   # -
 curl :8080/api/v1/hosts -H "Authorization: Bearer <token>"
 ```
 
-Cookies are `HttpOnly` + `SameSite=Lax`. Behind TLS, set `BLADEDR_SECURE_COOKIES=1`.
-Keep `.bladedr.env` private (gitignored) — it holds the deployment's secrets.
+Cookies are `HttpOnly` + `SameSite=Lax`, and `Secure` once TLS is on. Failed logins
+are rate-limited per source IP (a short lockout that backs off on repeated failures),
+so online password guessing is bounded. Keep `.bladedr.env` private (gitignored) — it
+holds the deployment's secrets.
 
 ## Credentials and SSH
 

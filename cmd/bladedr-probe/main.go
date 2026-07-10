@@ -14,7 +14,8 @@ import (
 	"bladedr/internal/rules"
 )
 
-const probeVersion = "0.1.0"
+// version is overridden at release build time via -ldflags "-X main.version=...".
+var version = "dev"
 
 func main() {
 	var (
@@ -27,7 +28,7 @@ func main() {
 	flag.Parse()
 
 	if *showVersion {
-		fmt.Println(probeVersion)
+		fmt.Println(version)
 		return
 	}
 	if *rulesPath == "" {
@@ -55,7 +56,7 @@ func main() {
 
 	result := probe.ScanResult{
 		Schema:          probe.SchemaScanResult,
-		ProbeVersion:    probeVersion,
+		ProbeVersion:    version,
 		BundleVersion:   bundle.BundleVersion,
 		CollectedAt:     snap.CollectedAt,
 		Host:            snap.Host,

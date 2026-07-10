@@ -302,10 +302,14 @@ type Store interface {
 	CreateSession(ctx context.Context, s *Session) error
 	SessionUser(ctx context.Context, token string) (*User, error) // valid (unexpired) session -> user
 	DeleteSession(ctx context.Context, token string) error
+	DeleteExpiredSessions(ctx context.Context) (int, error) // housekeeping; returns rows removed
 
 	// Security audit log (append-only).
 	AppendAudit(ctx context.Context, e *AuditEvent) error
 	ListAudit(ctx context.Context, limit int) ([]*AuditEvent, error)
+
+	// Ping reports whether the backing store is reachable (for readiness checks).
+	Ping(ctx context.Context) error
 }
 
 // ErrNotFound is returned when a lookup misses.

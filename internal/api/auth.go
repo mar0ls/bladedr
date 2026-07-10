@@ -2,14 +2,33 @@ package api
 
 import (
 	"context"
+	"crypto/subtle"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	"bladedr/internal/auth"
 	"bladedr/internal/store"
 )
+
+// acceptsIngestToken reports whether bearer matches any configured ingest token.
+// IngestToken may be a comma-separated list so a token can be rotated with no
+// downtime: set "new,old", roll the sensors onto "new", then drop "old". The compare
+// is constant-time to avoid leaking token bytes via timing.
+func (a *API) acceptsIngestToken(bearer string) bool {
+	if a.IngestToken == "" || bearer == "" {
+		return false
+	}
+	for _, t := range strings.Split(a.IngestToken, ",") {
+		t = strings.TrimSpace(t)
+		if t != "" && subtle.ConstantTimeCompare([]byte(bearer), []byte(t)) == 1 {
+			return true
+		}
+	}
+	return false
+}
 
 // clientIP extracts the caller's IP (honouring X-Forwarded-For's first hop).
 func clientIP(r *http.Request) string {
@@ -67,7 +86,7 @@ const userCtxKey ctxKey = 0
 // publicPath routes that need no authentication.
 func publicPath(p string) bool {
 	switch p {
-	case "/healthz", "/api/v1/login", "/ui/login", "/ui/logo.png":
+	case "/healthz", "/readyz", "/metrics", "/api/v1/login", "/ui/login", "/ui/logo.png":
 		return true
 	}
 	return false
@@ -103,9 +122,9 @@ func (a *API) authMiddleware(next http.Handler) http.Handler {
 		}
 		// Machine-to-machine sensor ingest: a valid ingest bearer token authorizes
 		// POST /hosts/{id}/events without a user session.
-		if a.IngestToken != "" && r.Method == http.MethodPost &&
-			strings.HasPrefix(p, "/api/v1/hosts/") && strings.HasSuffix(p, "/events") &&
-			r.Header.Get("Authorization") == "Bearer "+a.IngestToken {
+		if r.Method == http.MethodPost && strings.HasPrefix(p, "/api/v1/hosts/") &&
+			strings.HasSuffix(p, "/events") &&
+			a.acceptsIngestToken(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -138,15 +157,30 @@ func currentUser(r *http.Request) *store.User {
 
 // login authenticates a username/password and issues a session (cookie + token).
 func (a *API) login(w http.ResponseWriter, r *http.Request) {
+	ip := clientIP(r)
+	if a.loginLimiter != nil {
+		if wait := a.loginLimiter.retryAfter(ip, time.Now()); wait > 0 {
+			w.Header().Set("Retry-After", strconv.Itoa(int(wait.Seconds())+1))
+			a.auditAs(r, "", "login", "", "throttled", "too many failed attempts from "+ip)
+			writeError(w, http.StatusTooManyRequests, "too many attempts, try again later")
+			return
+		}
+	}
 	var body struct{ Username, Password string }
 	if !decode(w, r, &body) {
 		return
 	}
 	u, err := a.Store.GetUserByName(r.Context(), body.Username)
 	if err != nil || u.Disabled || !auth.CheckPassword(u.PasswordHash, body.Password) {
+		if a.loginLimiter != nil {
+			a.loginLimiter.fail(ip, time.Now())
+		}
 		a.auditAs(r, body.Username, "login", "", "denied", "invalid credentials")
 		writeError(w, http.StatusUnauthorized, "invalid credentials")
 		return
+	}
+	if a.loginLimiter != nil {
+		a.loginLimiter.reset(ip)
 	}
 	tok := auth.NewToken()
 	if err := a.Store.CreateSession(r.Context(), &store.Session{Token: tok, UserID: u.ID, ExpiresAt: time.Now().Add(sessionTTL)}); err != nil {

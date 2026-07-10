@@ -174,5 +174,5 @@ lockdown, systemd timers, GTFOBins in cron/sudo, initramfs hooks, SELinux-disabl
 ## Phase 2 (eBPF)
 
 `bladedr-sensor` = a thin Tetragon wrapper loading `linux-probe-shield` policies 1:1, streaming
-events into the same `observations` table / tagging / export. This unlocks the runtime half of
-the matrix (exec/injection/fileless/C2/credential-access) in one move.
+events into the same `observations` table / tagging / export. That covers the runtime half of
+the matrix (exec/injection/fileless/C2/credential-access).
