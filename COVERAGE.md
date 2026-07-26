@@ -6,8 +6,10 @@ updated as rules are added.
 **Legend**
 - ✅ **agentless-now** — state-based rule implemented (`internal/rules/builtin/`)
 - ⏳ **agentless-planned** — detectable from state (a persistent artifact), collector/rule to add
-- 🔬 **eBPF (Phase 2)** — ephemeral/behavioural; needs an eBPF sensor. Much of this is
-  covered by `linux-probe-shield` (Tetragon) — see the "policy" notes
+- 🔬 **eBPF (Phase 2)** — ephemeral/behavioural; needs an eBPF sensor. Reachable with
+  Tetragon TracingPolicies, which you currently write yourself — bladedr ships no bundle
+  yet, so the "policy" notes describe what a policy would have to hook, not something
+  you get out of the box
 
 ## Why the split
 
@@ -173,6 +175,8 @@ lockdown, systemd timers, GTFOBins in cron/sudo, initramfs hooks, SELinux-disabl
 
 ## Phase 2 (eBPF)
 
-`bladedr-sensor` = a thin Tetragon wrapper loading `linux-probe-shield` policies 1:1, streaming
-events into the same `observations` table / tagging / export. That covers the runtime half of
-the matrix (exec/injection/fileless/C2/credential-access).
+`bladedr-sensor` = a thin Tetragon wrapper loading TracingPolicies 1:1, streaming events into
+the same `observations` table / tagging / export. That is how the runtime half of the matrix
+(exec/injection/fileless/C2/credential-access) becomes reachable — but the coverage is
+whatever your policies cover. bladedr supplies the pipeline, not the policies; a written and
+kernel-tested set is planned for a later release.
