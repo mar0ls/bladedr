@@ -99,6 +99,18 @@ func publicPath(p string) bool {
 	return false
 }
 
+// passwordChangePath is the allowlist for an account under a forced password change.
+// Deliberately tiny: the change itself, the form that submits it, /me so a client can
+// see why it is being refused, and logout so the account can always walk away instead of
+// being trapped in a loop.
+func passwordChangePath(p string) bool {
+	switch p {
+	case "/api/v1/me/password", "/ui/password", "/api/v1/me", "/api/v1/logout":
+		return true
+	}
+	return false
+}
+
 // userFromRequest resolves the session token (UI cookie or API bearer) to a user.
 func (a *API) userFromRequest(r *http.Request) *store.User {
 	tok := ""
@@ -158,6 +170,19 @@ func (a *API) authMiddleware(next http.Handler) http.Handler {
 		if !auth.Allowed(u.Role, r.Method, p) {
 			a.auditAs(r, u.Username, "access.denied", r.Method+" "+p, "denied", "role="+u.Role)
 			writeError(w, http.StatusForbidden, "insufficient role ("+u.Role+")")
+			return
+		}
+		// A password someone else has seen buys exactly one thing: the chance to replace
+		// it. Enforced here rather than per-handler so a route added later is covered by
+		// default — the failure mode of forgetting is then a locked-out account, not an
+		// open one.
+		if u.MustChangePassword && !passwordChangePath(p) {
+			if isUI {
+				http.Redirect(w, r, "/ui/password", http.StatusSeeOther)
+			} else {
+				writeError(w, http.StatusForbidden,
+					"password change required: POST /api/v1/me/password before using the API")
+			}
 			return
 		}
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), userCtxKey, u)))
@@ -352,6 +377,56 @@ func (a *API) disableMFA(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// minPasswordLen matches what createUser and patchUser already enforce. Keeping the
+// self-service path on the same floor avoids a route that quietly accepts weaker
+// passwords than the admin one.
+const minPasswordLen = 8
+
+// changeOwnPassword is the only route a must-change account can reach. It takes the
+// current password as well as the new one: the session may have been resumed from a
+// machine the account holder walked away from, and a forced change exists precisely
+// because the current password is known to more people than it should be.
+func (a *API) changeOwnPassword(w http.ResponseWriter, r *http.Request) {
+	u := currentUser(r)
+	if u == nil {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+	var body struct {
+		CurrentPassword string `json:"current_password"`
+		NewPassword     string `json:"new_password"`
+	}
+	if !decode(w, r, &body) {
+		return
+	}
+	if !auth.CheckPassword(u.PasswordHash, body.CurrentPassword) {
+		a.audit(r, "password.change", u.Username, "denied", "current password incorrect")
+		writeError(w, http.StatusUnauthorized, "current password incorrect")
+		return
+	}
+	if len(body.NewPassword) < minPasswordLen {
+		writeError(w, http.StatusBadRequest,
+			"new password must be at least "+strconv.Itoa(minPasswordLen)+" chars")
+		return
+	}
+	if body.NewPassword == body.CurrentPassword {
+		writeError(w, http.StatusBadRequest, "new password must differ from the current one")
+		return
+	}
+	hash, err := auth.HashPassword(body.NewPassword)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	u.PasswordHash, u.MustChangePassword = hash, false
+	if err := a.Store.UpdateUser(r.Context(), u); err != nil {
+		writeErr(w, err)
+		return
+	}
+	a.audit(r, "password.change", u.Username, "ok", "")
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (a *API) listSensorTokens(w http.ResponseWriter, r *http.Request) {
 	if _, err := a.Store.GetHost(r.Context(), r.PathValue("id")); err != nil {
 		writeErr(w, err)
@@ -438,7 +513,9 @@ func (a *API) createUser(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	u := &store.User{Username: body.Username, PasswordHash: hash, Role: body.Role}
+	// The admin creating the account picked this password, so they know it. It gets the
+	// new user in and nothing more.
+	u := &store.User{Username: body.Username, PasswordHash: hash, Role: body.Role, MustChangePassword: true}
 	if err := a.Store.CreateUser(r.Context(), u); err != nil {
 		writeError(w, http.StatusConflict, err.Error())
 		return
@@ -476,9 +553,14 @@ func (a *API) patchUser(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "password must be at least 8 chars")
 			return
 		}
-		if h, err := auth.HashPassword(*body.Password); err == nil {
-			u.PasswordHash = h
+		h, err := auth.HashPassword(*body.Password)
+		if err != nil {
+			writeErr(w, err)
+			return
 		}
+		// An admin reset means two people know this password. It is a way back in for a
+		// locked-out user, not a password they get to keep.
+		u.PasswordHash, u.MustChangePassword = h, true
 	}
 	if err := a.Store.UpdateUser(r.Context(), u); err != nil {
 		writeErr(w, err)

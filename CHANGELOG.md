@@ -39,6 +39,12 @@ versions follow [SemVer](https://semver.org).
   networks. Without it `X-Forwarded-For` is ignored, so a spoofed header can't dodge the
   login lockout or misattribute an audit entry.
 - Keyset pagination on observations, so paging a large fleet can't skip or repeat rows.
+- Forced password change (`POST /api/v1/me/password`, `/ui/password`). A password the
+  account holder didn't choose — a generated bootstrap password, which the startup log
+  keeps, or one an admin set or reset — has to be replaced before anything else works.
+  Every other route returns `403` until then and the console redirects to the form.
+  Self-service password change is available to every role, which also means a viewer can
+  finally enrol MFA on their own account.
 
 ### Changed
 - Sensors authenticate per host instead of with a shared `BLADEDR_INGEST_TOKEN`. The
@@ -56,13 +62,36 @@ versions follow [SemVer](https://semver.org).
   to `true_positive`, which quietly taught the model that benign-but-flagged scenarios
   were real findings.
 
+### Upgrade notes
+- **Everyone is logged out once.** Sessions used to be stored as the bearer token
+  itself; they are digests now, and a plaintext token can't be converted into its own
+  hash, so migration `0002` empties the session table. Sign in again after the upgrade.
+  API clients holding a token need a fresh one.
+- Sensor tokens are per host now. A sensor still configured with the old shared
+  `BLADEDR_INGEST_TOKEN` will be rejected — mint one per host
+  (`POST /api/v1/hosts/{id}/sensor-tokens`) or redeploy, which does it for you.
+- Existing accounts are **not** forced to change their passwords on upgrade. Migration
+  `0009` defaults the flag to false: those operators chose their passwords, and locking a
+  running deployment out of its own console would be a worse failure than the one this
+  prevents. It applies to accounts created or reset from 0.9.0 onward.
+- Nothing else is dropped or rewritten. Hosts, scans, observations, triage state, rules,
+  baselines, credentials and audit history all carry across; there is a test that seeds a
+  0.1.0-era schema, upgrades it and asserts exactly that.
+
 ### Fixed
 - `isolate_host` accepted `control_plane_ip` without `control_plane_port` at request
   time but refused it at execution — after a second admin had already approved the
   action. Both fields now fall back to `BLADEDR_SERVER_URL` independently.
+- The store contract suite `TRUNCATE`s every table but accepted any DSN, and the README
+  handed you the same one it uses for the dev server — so following the docs wiped your
+  own database. It now refuses a database whose name doesn't mark it as disposable.
 - The probe cache guard compared the directory mode literally against `drwx------`,
-  which fails closed on every SELinux or ACL-bearing host (`ls` appends `.` or `+`), so
-  no scan would run on RHEL-derived distros. The mode is now matched as a prefix.
+  but `ls` appends `.` for an SELinux context, so on a RHEL-derived host the staging
+  directory reads `drwx------.` and the guard refused it — **no agentless scan could run
+  on that family at all**. The mode is matched as a prefix now. Confirmed end to end on
+  Rocky Linux 10.2 with SELinux Enforcing: a scan completes, the probe caches under its
+  content hash, and a second scan reuses it. Permissive modes are still refused with the
+  suffix present.
 
 ## [0.8.0] - 2026-07-10
 

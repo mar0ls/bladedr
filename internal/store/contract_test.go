@@ -3,7 +3,6 @@ package store
 import (
 	"context"
 	"fmt"
-	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -15,10 +14,13 @@ import (
 // production backend gets the least coverage and any drift in cursor ordering, claim
 // atomicity or legal state transitions shows up as an incident rather than a failure.
 //
-// The Postgres pass needs BLADEDR_TEST_DATABASE_URL and is skipped without it:
+// The Postgres pass needs BLADEDR_TEST_DATABASE_URL and is skipped without it. It
+// TRUNCATEs every table, so point it at a scratch database, never the one you run the
+// server against — see testDSN, which refuses anything not named for testing:
 //
 //	docker compose up -d
-//	BLADEDR_TEST_DATABASE_URL="postgres://bladedr:bladedr@localhost:5432/bladedr" go test ./internal/store/
+//	docker compose exec db createdb -U bladedr bladedr_test
+//	BLADEDR_TEST_DATABASE_URL="postgres://bladedr:bladedr@localhost:5432/bladedr_test" go test ./internal/store/
 //
 // A case failing on exactly one backend means that backend is wrong; the assertions
 // describe the contract, not either implementation's current behaviour.
@@ -33,15 +35,7 @@ func TestStoreContract(t *testing.T) {
 	})
 
 	t.Run("postgres", func(t *testing.T) {
-		dsn := os.Getenv("BLADEDR_TEST_DATABASE_URL")
-		if dsn == "" {
-			t.Skip("set BLADEDR_TEST_DATABASE_URL to run the contract suite against Postgres")
-		}
-		pg, err := OpenPostgres(context.Background(), dsn)
-		if err != nil {
-			t.Fatalf("open postgres: %v", err)
-		}
-		t.Cleanup(pg.Close)
+		pg := openTestPostgres(t)
 		runStoreContract(t, func(t *testing.T) Store {
 			truncateAll(t, pg)
 			return pg

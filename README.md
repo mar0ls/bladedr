@@ -99,9 +99,15 @@ asserted once in `internal/store/contract_test.go` and run against both, so the
 production backend is not the least-tested one. The Postgres pass needs a live
 database; CI runs it and fails if it skips.
 
+The suite `TRUNCATE`s every table between cases, so it needs a scratch database — not
+the one above that you run the server against. It refuses any database whose name
+doesn't contain `test`, because the two DSNs otherwise differ by nothing and wiping your
+dev data is a silent, one-keystroke mistake:
+
 ```sh
 docker compose up -d
-BLADEDR_TEST_DATABASE_URL=postgres://bladedr:bladedr@localhost:5432/bladedr \
+docker compose exec db createdb -U bladedr bladedr_test    # once
+BLADEDR_TEST_DATABASE_URL=postgres://bladedr:bladedr@localhost:5432/bladedr_test \
   go test ./internal/store/
 ```
 
@@ -162,6 +168,10 @@ The HTTP listener applies a 10-second header timeout, 30-second request-read tim
 5-minute response-write timeout and 2-minute idle timeout.
 
 Detection coverage vs the Linux ATT&CK / EDR-T matrix: [COVERAGE.md](COVERAGE.md).
+
+Which parts are stable enough to build on — and which are Beta or experimental — is in
+[docs/stability.md](docs/stability.md). Response actions and the eBPF tier are Beta;
+risk scoring is experimental.
 
 ## Rules
 
@@ -327,6 +337,19 @@ server-push path installs to `/opt/bladedr` and runs the sensor as a systemd uni
 Console and API require auth. A fresh install creates an admin account (password from
 `BLADEDR_ADMIN_PASSWORD`, or generated and printed once). Sign in at `/ui/login`; the
 session works as a cookie (UI) or `Authorization: Bearer <token>` (API).
+
+A password you didn't choose has to be replaced before the account can do anything else.
+That covers a generated bootstrap password — it goes to the startup log, so it also lives
+in scrollback and journald — plus any account an admin created or reset, where two people
+know the password. Until it's changed, every route answers `403` except the change
+itself, and the console redirects to `/ui/password`. A password you set through
+`BLADEDR_ADMIN_PASSWORD` is already yours, so it isn't forced.
+
+```sh
+curl -H "$AUTH" -X POST :8080/api/v1/me/password \
+  -H 'content-type: application/json' \
+  -d '{"current_password":"…","new_password":"…"}'    # 204, flag cleared
+```
 
 Roles: admin (everything + users/credentials/response decisions), operator (read +
 triage/scan/rules/sensor), viewer (read-only). Only admins create users and assign

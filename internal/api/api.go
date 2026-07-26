@@ -136,6 +136,7 @@ func (a *API) Routes() http.Handler {
 	mux.HandleFunc("POST /api/v1/login", a.login)
 	mux.HandleFunc("POST /api/v1/logout", a.logout)
 	mux.HandleFunc("GET /api/v1/me", a.me)
+	mux.HandleFunc("POST /api/v1/me/password", a.changeOwnPassword)
 	mux.HandleFunc("POST /api/v1/me/mfa/setup", a.setupMFA)
 	mux.HandleFunc("POST /api/v1/me/mfa/confirm", a.confirmMFA)
 	mux.HandleFunc("DELETE /api/v1/me/mfa", a.disableMFA)

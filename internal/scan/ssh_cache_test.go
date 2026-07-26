@@ -119,8 +119,13 @@ func TestCacheDirScriptRejectsSymlink(t *testing.T) {
 
 // ls appends '.' for an SELinux context and '+' for an ACL, so a correctly-permissioned
 // directory reads as `drwx------.` on every RHEL-derived distro. A literal comparison
-// against "drwx------" fails closed there and no scan runs at all. macOS cannot produce
-// either suffix, hence the stubbed ls.
+// against "drwx------" fails closed there and no scan runs at all.
+//
+// The stub is here because the machine running this test usually can't produce either
+// suffix — macOS has neither, and a Linux container only gets '.' if the host kernel has
+// SELinux enabled. The real shapes were confirmed out of band on Rocky Linux 10.2 with
+// SELinux Enforcing (`drwx------.`) and on Debian 12 with setfacl (`drwx------+`); this
+// test pins the guard's handling of them so a future edit can't quietly regress it.
 func TestCacheDirScriptAcceptsSELinuxAndACLSuffixes(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX shell guard")
@@ -135,11 +140,14 @@ func TestCacheDirScriptAcceptsSELinuxAndACLSuffixes(t *testing.T) {
 }
 
 // The suffix must not become a way to smuggle a permissive mode past the check.
+// drwxr-----+ is the shape GNU ls actually produces for an access ACL that grants a
+// named user read: the ACL mask is printed in the group field, so the mode itself is no
+// longer private and must be refused on that basis, suffix notwithstanding.
 func TestCacheDirScriptRejectsSuffixedPermissiveModes(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX shell guard")
 	}
-	for _, mode := range []string{"drwxr-xr-x.", "drwxrwxrwx+", "drwx-----x.", "lrwxrwxrwx"} {
+	for _, mode := range []string{"drwxr-xr-x.", "drwxrwxrwx+", "drwx-----x.", "drwxr-----+", "lrwxrwxrwx"} {
 		dir := filepath.Join(t.TempDir(), "cache")
 		ok, stderr := runCacheScript(t, dir, stubLS(t, mode))
 		if ok {
