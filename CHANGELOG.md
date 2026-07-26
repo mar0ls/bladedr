@@ -76,8 +76,12 @@ versions follow [SemVer](https://semver.org).
   handed you the same one it uses for the dev server — so following the docs wiped your
   own database. It now refuses a database whose name doesn't mark it as disposable.
 - The probe cache guard compared the directory mode literally against `drwx------`,
-  which fails closed on every SELinux or ACL-bearing host (`ls` appends `.` or `+`), so
-  no scan would run on RHEL-derived distros. The mode is now matched as a prefix.
+  but `ls` appends `.` for an SELinux context, so on a RHEL-derived host the staging
+  directory reads `drwx------.` and the guard refused it — **no agentless scan could run
+  on that family at all**. The mode is matched as a prefix now. Confirmed end to end on
+  Rocky Linux 10.2 with SELinux Enforcing: a scan completes, the probe caches under its
+  content hash, and a second scan reuses it. Permissive modes are still refused with the
+  suffix present.
 
 ## [0.8.0] - 2026-07-10
 

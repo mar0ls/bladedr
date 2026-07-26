@@ -108,7 +108,13 @@ const probeCacheDir = "/tmp/.bladedr"
 // group field (ls prints the ACL mask there, e.g. `drwxr-----+`), so it fails the check
 // on its mode and is refused — which is right, since the directory is no longer private.
 // A default or empty ACL leaves the access mode alone, reads as `drwx------+`, and
-// passes. Verified against GNU coreutils 9.1.
+// passes.
+//
+// Checked on the real thing rather than inferred: Rocky Linux 10.2, SELinux Enforcing,
+// coreutils 9.5, where the staging directory reads `drwx------.` (context
+// unconfined_u:object_r:user_tmp_t:s0). The literal comparison this replaced refuses
+// that, which grounded every scan on the whole RHEL family. Permissive modes are still
+// rejected there with the suffix present.
 func cacheDirScript(dir string) string {
 	d := shellArg(dir)
 	return `set -u
