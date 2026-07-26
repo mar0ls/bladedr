@@ -98,9 +98,17 @@ const probeCacheDir = "/tmp/.bladedr"
 // check. ls -ld doesn't dereference, which is what catches a symlink parked at the
 // cache path; -n prints uids numerically because the owner may not resolve to a name.
 //
-// The mode is matched as a prefix, not compared literally: ls appends '.' when the
-// file carries an SELinux context and '+' when it carries an ACL, so `drwx------.` on
-// anything RHEL-derived is the normal case, not an attack.
+// The ten mode characters are matched with one optional suffix rather than compared
+// literally, because ls appends '.' for an SELinux context and '+' for an ACL. On
+// anything RHEL-derived `drwx------.` is simply what a correct directory looks like, and
+// a literal comparison against "drwx------" refuses every host in that family.
+//
+// Only the suffix is tolerated, never the mode itself. That distinction matters more
+// than it looks: an ACL that actually grants another user access shows up as a changed
+// group field (ls prints the ACL mask there, e.g. `drwxr-----+`), so it fails the check
+// on its mode and is refused — which is right, since the directory is no longer private.
+// A default or empty ACL leaves the access mode alone, reads as `drwx------+`, and
+// passes. Verified against GNU coreutils 9.1.
 func cacheDirScript(dir string) string {
 	d := shellArg(dir)
 	return `set -u

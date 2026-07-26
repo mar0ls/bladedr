@@ -127,3 +127,45 @@ jobs:
         with:
           generate_release_notes: true
           files: dist/*
+
+  # The image is the primary artifact: `docker run` with a database URL and a node key
+  # should be a working control plane. Published only on a tag, and only after build,
+  # semgrep and smoke have passed on that same commit.
+  image:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build, semgrep, smoke]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: cicd-sensor/cicd-sensor-action@2b76335ff1c2dd298e983961f7a200d3fe9076c2 # v0.0.36
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      # arm64 is emulated here. It only builds Go binaries, so the cost is tolerable;
+      # if it ever gets slow, split it onto a native arm64 runner instead of dropping
+      # the platform — the probe ships for arm64, so the server should too.
+      - uses: docker/setup-qemu-action@29109295f81e9208d7d86ff1c6c12d2833863392 # v3
+      - uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3
+      - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
+        with:
+          images: mar0ls/bladedr
+          # latest tracks the newest stable tag; a prerelease (v1.0.0-rc1) publishes
+          # its own tag but must not move latest.
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+          flavor: latest=${{ !contains(github.ref_name, '-') }}
+      - uses: docker/build-push-action@471d1dc4e07e5cdedd4c2171150001c434f0b7a4 # v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: true
+          sbom: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

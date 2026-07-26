@@ -135,11 +135,14 @@ func TestCacheDirScriptAcceptsSELinuxAndACLSuffixes(t *testing.T) {
 }
 
 // The suffix must not become a way to smuggle a permissive mode past the check.
+// drwxr-----+ is the shape GNU ls actually produces for an access ACL that grants a
+// named user read: the ACL mask is printed in the group field, so the mode itself is no
+// longer private and must be refused on that basis, suffix notwithstanding.
 func TestCacheDirScriptRejectsSuffixedPermissiveModes(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX shell guard")
 	}
-	for _, mode := range []string{"drwxr-xr-x.", "drwxrwxrwx+", "drwx-----x.", "lrwxrwxrwx"} {
+	for _, mode := range []string{"drwxr-xr-x.", "drwxrwxrwx+", "drwx-----x.", "drwxr-----+", "lrwxrwxrwx"} {
 		dir := filepath.Join(t.TempDir(), "cache")
 		ok, stderr := runCacheScript(t, dir, stubLS(t, mode))
 		if ok {
