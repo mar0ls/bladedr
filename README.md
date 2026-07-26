@@ -99,9 +99,15 @@ asserted once in `internal/store/contract_test.go` and run against both, so the
 production backend is not the least-tested one. The Postgres pass needs a live
 database; CI runs it and fails if it skips.
 
+The suite `TRUNCATE`s every table between cases, so it needs a scratch database — not
+the one above that you run the server against. It refuses any database whose name
+doesn't contain `test`, because the two DSNs otherwise differ by nothing and wiping your
+dev data is a silent, one-keystroke mistake:
+
 ```sh
 docker compose up -d
-BLADEDR_TEST_DATABASE_URL=postgres://bladedr:bladedr@localhost:5432/bladedr \
+docker compose exec db createdb -U bladedr bladedr_test    # once
+BLADEDR_TEST_DATABASE_URL=postgres://bladedr:bladedr@localhost:5432/bladedr_test \
   go test ./internal/store/
 ```
 
@@ -162,6 +168,10 @@ The HTTP listener applies a 10-second header timeout, 30-second request-read tim
 5-minute response-write timeout and 2-minute idle timeout.
 
 Detection coverage vs the Linux ATT&CK / EDR-T matrix: [COVERAGE.md](COVERAGE.md).
+
+Which parts are stable enough to build on — and which are Beta or experimental — is in
+[docs/stability.md](docs/stability.md). Response actions and the eBPF tier are Beta;
+risk scoring is experimental.
 
 ## Rules
 
