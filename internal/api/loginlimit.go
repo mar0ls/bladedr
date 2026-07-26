@@ -5,11 +5,8 @@ import (
 	"time"
 )
 
-// loginLimiter throttles password guessing per client IP. After a burst of failures
-// an IP is locked out for a backoff that doubles with each further failure, capped.
-// It is in-memory (per server process), self-pruning, and cleared on a successful
-// login. Not a substitute for a WAF at scale, but it turns online brute force from
-// "unbounded" into "a handful of tries per window".
+// loginLimiter applies a capped exponential lockout per client IP. State is local to
+// one server process and is removed after a successful login or an idle window.
 type loginLimiter struct {
 	mu        sync.Mutex
 	attempts  map[string]*loginAttempt
@@ -76,8 +73,7 @@ func (l *loginLimiter) reset(ip string) {
 	delete(l.attempts, ip)
 }
 
-// prune drops stale entries so the map can't grow unbounded. Caller holds the lock;
-// it does real work at most once per window.
+// prune removes stale entries at most once per login window. The caller holds l.mu.
 func (l *loginLimiter) prune(now time.Time) {
 	if now.Before(l.nextPrune) {
 		return

@@ -41,6 +41,31 @@ func TestStatusRecorderCapturesCode(t *testing.T) {
 	}
 }
 
+func TestStatusRecorderKeepsFirstStatus(t *testing.T) {
+	underlying := httptest.NewRecorder()
+	rec := &statusRecorder{ResponseWriter: underlying, status: http.StatusOK}
+	rec.WriteHeader(http.StatusAccepted)
+	rec.WriteHeader(http.StatusInternalServerError)
+
+	if rec.status != http.StatusAccepted || underlying.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, underlying = %d; want first status %d",
+			rec.status, underlying.Code, http.StatusAccepted)
+	}
+}
+
+func TestStatusRecorderWriteCommitsOK(t *testing.T) {
+	underlying := httptest.NewRecorder()
+	rec := &statusRecorder{ResponseWriter: underlying, status: http.StatusOK}
+	if _, err := rec.Write([]byte("ok")); err != nil {
+		t.Fatal(err)
+	}
+	rec.WriteHeader(http.StatusInternalServerError)
+
+	if rec.status != http.StatusOK || underlying.Code != http.StatusOK {
+		t.Fatalf("status = %d, underlying = %d; want 200", rec.status, underlying.Code)
+	}
+}
+
 func TestReadyzOK(t *testing.T) {
 	a := &API{Store: store.NewMemory()}
 	w := httptest.NewRecorder()

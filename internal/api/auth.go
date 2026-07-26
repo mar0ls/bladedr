@@ -2,9 +2,9 @@ package api
 
 import (
 	"context"
-	"crypto/subtle"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -13,30 +13,41 @@ import (
 	"bladedr/internal/store"
 )
 
-// acceptsIngestToken reports whether bearer matches any configured ingest token.
-// IngestToken may be a comma-separated list so a token can be rotated with no
-// downtime: set "new,old", roll the sensors onto "new", then drop "old". The compare
-// is constant-time to avoid leaking token bytes via timing.
-func (a *API) acceptsIngestToken(bearer string) bool {
-	if a.IngestToken == "" || bearer == "" {
-		return false
+func bearerToken(r *http.Request) string {
+	h := r.Header.Get("Authorization")
+	if !strings.HasPrefix(h, "Bearer ") {
+		return ""
 	}
-	for _, t := range strings.Split(a.IngestToken, ",") {
-		t = strings.TrimSpace(t)
-		if t != "" && subtle.ConstantTimeCompare([]byte(bearer), []byte(t)) == 1 {
-			return true
-		}
-	}
-	return false
+	return strings.TrimSpace(strings.TrimPrefix(h, "Bearer "))
 }
 
-// clientIP extracts the caller's IP (honouring X-Forwarded-For's first hop).
-func clientIP(r *http.Request) string {
-	if h := r.Header.Get("X-Forwarded-For"); h != "" {
-		return strings.TrimSpace(strings.Split(h, ",")[0])
+func remoteIP(r *http.Request) net.IP {
+	host := r.RemoteAddr
+	if ip, _, err := net.SplitHostPort(host); err == nil {
+		host = ip
 	}
-	if ip, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
-		return ip
+	return net.ParseIP(strings.TrimSpace(host))
+}
+
+// clientIP only honours forwarding headers when the direct peer belongs to an
+// explicitly trusted proxy network. With the default empty list, spoofed
+// X-Forwarded-For values never affect throttling or audit attribution.
+func (a *API) clientIP(r *http.Request) string {
+	peer := remoteIP(r)
+	trusted := false
+	for _, network := range a.TrustedProxies {
+		if peer != nil && network.Contains(peer) {
+			trusted = true
+			break
+		}
+	}
+	if trusted {
+		if first := strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-For"), ",")[0]); net.ParseIP(first) != nil {
+			return first
+		}
+	}
+	if peer != nil {
+		return peer.String()
 	}
 	return r.RemoteAddr
 }
@@ -54,21 +65,17 @@ func (a *API) audit(r *http.Request, action, target, result, detail string) {
 // where there is no authenticated user yet).
 func (a *API) auditAs(r *http.Request, actor, action, target, result, detail string) {
 	_ = a.Store.AppendAudit(r.Context(), &store.AuditEvent{
-		Actor: actor, ActorIP: clientIP(r), Action: action, Target: target, Result: result, Detail: detail,
+		Actor: actor, ActorIP: a.clientIP(r), Action: action, Target: target, Result: result, Detail: detail,
 	})
 }
 
 const sessionCookie = "bladedr_session"
 const sessionTTL = 12 * time.Hour
 
-// sessionCookieValue builds the session cookie. Secure is set when SecureCookies is
-// enabled (behind TLS) — required there so the cookie is never sent over plain HTTP;
-// it is off by default so login still works on a plain-HTTP trusted-LAN deployment.
-// SameSite=Lax already blocks the cookie on cross-site POSTs (CSRF protection).
+// sessionCookieValue creates or expires the authentication cookie.
 func (a *API) sessionCookieValue(tok string, exp time.Time) *http.Cookie {
-	// Secure is configurable (a.SecureCookies / BLADEDR_SECURE_COOKIES) — enabled
-	// behind TLS, off for a plain-HTTP trusted-LAN deploy. SameSite=Lax + HttpOnly are
-	// always set (CSRF + XSS-read protection).
+	// Secure is configured from TLS state or BLADEDR_SECURE_COOKIES. SameSite and
+	// HttpOnly apply to every deployment.
 	// nosemgrep: go.lang.security.audit.net.cookie-missing-secure.cookie-missing-secure
 	c := &http.Cookie{Name: sessionCookie, Value: tok, Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: a.SecureCookies}
 	if tok == "" {
@@ -86,7 +93,7 @@ const userCtxKey ctxKey = 0
 // publicPath routes that need no authentication.
 func publicPath(p string) bool {
 	switch p {
-	case "/healthz", "/readyz", "/metrics", "/api/v1/login", "/ui/login", "/ui/logo.png":
+	case "/healthz", "/readyz", "/metrics", "/openapi.yaml", "/api/v1/login", "/ui/login", "/ui/logo.png":
 		return true
 	}
 	return false
@@ -98,13 +105,13 @@ func (a *API) userFromRequest(r *http.Request) *store.User {
 	if c, err := r.Cookie(sessionCookie); err == nil {
 		tok = c.Value
 	}
-	if h := r.Header.Get("Authorization"); strings.HasPrefix(h, "Bearer ") {
-		tok = strings.TrimPrefix(h, "Bearer ")
+	if bearer := bearerToken(r); bearer != "" {
+		tok = bearer
 	}
 	if tok == "" {
 		return nil
 	}
-	u, err := a.Store.SessionUser(r.Context(), tok)
+	u, err := a.Store.SessionUser(r.Context(), auth.TokenDigest(tok))
 	if err != nil {
 		return nil
 	}
@@ -120,13 +127,23 @@ func (a *API) authMiddleware(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		// Machine-to-machine sensor ingest: a valid ingest bearer token authorizes
-		// POST /hosts/{id}/events without a user session.
+		// Machine-to-machine sensor ingest: the credential is bound to the host id in
+		// the URL. A sensor credential can never impersonate another host.
 		if r.Method == http.MethodPost && strings.HasPrefix(p, "/api/v1/hosts/") &&
-			strings.HasSuffix(p, "/events") &&
-			a.acceptsIngestToken(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")) {
-			next.ServeHTTP(w, r)
-			return
+			strings.HasSuffix(p, "/events") {
+			hostID := strings.TrimSuffix(strings.TrimPrefix(p, "/api/v1/hosts/"), "/events")
+			bearer := bearerToken(r)
+			if bearer != "" {
+				ok, err := a.Store.SensorTokenValid(r.Context(), hostID, auth.TokenDigest(bearer))
+				if err != nil {
+					writeError(w, http.StatusServiceUnavailable, "sensor authentication unavailable")
+					return
+				}
+				if ok {
+					next.ServeHTTP(w, r)
+					return
+				}
+			}
 		}
 		isUI := strings.HasPrefix(p, "/ui")
 		u := a.userFromRequest(r)
@@ -157,7 +174,7 @@ func currentUser(r *http.Request) *store.User {
 
 // login authenticates a username/password and issues a session (cookie + token).
 func (a *API) login(w http.ResponseWriter, r *http.Request) {
-	ip := clientIP(r)
+	ip := a.clientIP(r)
 	if a.loginLimiter != nil {
 		if wait := a.loginLimiter.retryAfter(ip, time.Now()); wait > 0 {
 			w.Header().Set("Retry-After", strconv.Itoa(int(wait.Seconds())+1))
@@ -166,12 +183,19 @@ func (a *API) login(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	var body struct{ Username, Password string }
+	var body struct{ Username, Password, OTP string }
 	if !decode(w, r, &body) {
 		return
 	}
+	// An unknown or disabled account must cost the same as a wrong password, so the
+	// no-user branch still performs a bcrypt comparison. Short-circuiting here would
+	// let an unauthenticated caller enumerate valid usernames by response latency.
 	u, err := a.Store.GetUserByName(r.Context(), body.Username)
-	if err != nil || u.Disabled || !auth.CheckPassword(u.PasswordHash, body.Password) {
+	ok := err == nil && !u.Disabled && auth.CheckPassword(u.PasswordHash, body.Password)
+	if err != nil || u.Disabled {
+		ok = auth.DummyCheckPassword(body.Password)
+	}
+	if !ok {
 		if a.loginLimiter != nil {
 			a.loginLimiter.fail(ip, time.Now())
 		}
@@ -179,11 +203,26 @@ func (a *API) login(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "invalid credentials")
 		return
 	}
+	if u.MFAEnabled {
+		if a.Crypto == nil || !a.Crypto.CanOpen() {
+			writeError(w, http.StatusServiceUnavailable, "MFA key unavailable")
+			return
+		}
+		secret, openErr := a.Crypto.Open(u.MFASecretEnc)
+		if openErr != nil || !auth.VerifyTOTP(string(secret), body.OTP, time.Now()) {
+			if a.loginLimiter != nil {
+				a.loginLimiter.fail(ip, time.Now())
+			}
+			a.auditAs(r, body.Username, "login", "", "denied", "invalid MFA code")
+			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "valid MFA code required", "mfa_required": true})
+			return
+		}
+	}
 	if a.loginLimiter != nil {
 		a.loginLimiter.reset(ip)
 	}
 	tok := auth.NewToken()
-	if err := a.Store.CreateSession(r.Context(), &store.Session{Token: tok, UserID: u.ID, ExpiresAt: time.Now().Add(sessionTTL)}); err != nil {
+	if err := a.Store.CreateSession(r.Context(), &store.Session{TokenHash: auth.TokenDigest(tok), UserID: u.ID, ExpiresAt: time.Now().Add(sessionTTL)}); err != nil {
 		writeErr(w, err)
 		return
 	}
@@ -195,10 +234,10 @@ func (a *API) login(w http.ResponseWriter, r *http.Request) {
 // logout revokes the current session.
 func (a *API) logout(w http.ResponseWriter, r *http.Request) {
 	if c, err := r.Cookie(sessionCookie); err == nil {
-		_ = a.Store.DeleteSession(r.Context(), c.Value)
+		_ = a.Store.DeleteSession(r.Context(), auth.TokenDigest(c.Value))
 	}
-	if h := r.Header.Get("Authorization"); strings.HasPrefix(h, "Bearer ") {
-		_ = a.Store.DeleteSession(r.Context(), strings.TrimPrefix(h, "Bearer "))
+	if tok := bearerToken(r); tok != "" {
+		_ = a.Store.DeleteSession(r.Context(), auth.TokenDigest(tok))
 	}
 	a.audit(r, "logout", "", "ok", "")
 	http.SetCookie(w, a.sessionCookieValue("", time.Time{}))
@@ -212,6 +251,158 @@ func (a *API) me(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeError(w, http.StatusUnauthorized, "not authenticated")
+}
+
+func (a *API) setupMFA(w http.ResponseWriter, r *http.Request) {
+	u := currentUser(r)
+	if u == nil {
+		writeError(w, http.StatusUnauthorized, "not authenticated")
+		return
+	}
+	if a.Crypto == nil {
+		writeError(w, http.StatusServiceUnavailable, "secret encryption unavailable")
+		return
+	}
+	var body struct {
+		Password string `json:"password"`
+	}
+	if !decode(w, r, &body) {
+		return
+	}
+	if !auth.CheckPassword(u.PasswordHash, body.Password) {
+		writeError(w, http.StatusUnauthorized, "password confirmation failed")
+		return
+	}
+	secret, err := auth.NewTOTPSecret()
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	sealed, err := a.Crypto.Seal([]byte(secret))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	u.MFASecretEnc, u.MFAEnabled = sealed, false
+	if err := a.Store.UpdateUser(r.Context(), u); err != nil {
+		writeErr(w, err)
+		return
+	}
+	label := url.QueryEscape("bladedr:" + u.Username)
+	uri := "otpauth://totp/" + label + "?secret=" + url.QueryEscape(secret) + "&issuer=bladedr&algorithm=SHA1&digits=6&period=30"
+	a.audit(r, "mfa.setup", u.Username, "ok", "pending confirmation")
+	writeJSON(w, http.StatusOK, map[string]string{"secret": secret, "otpauth_uri": uri})
+}
+
+func (a *API) confirmMFA(w http.ResponseWriter, r *http.Request) {
+	u := currentUser(r)
+	if u == nil || len(u.MFASecretEnc) == 0 {
+		writeError(w, http.StatusBadRequest, "MFA setup has not been started")
+		return
+	}
+	if a.Crypto == nil || !a.Crypto.CanOpen() {
+		writeError(w, http.StatusServiceUnavailable, "MFA key unavailable")
+		return
+	}
+	var body struct {
+		Code string `json:"code"`
+	}
+	if !decode(w, r, &body) {
+		return
+	}
+	secret, err := a.Crypto.Open(u.MFASecretEnc)
+	if err != nil || !auth.VerifyTOTP(string(secret), body.Code, time.Now()) {
+		writeError(w, http.StatusBadRequest, "invalid MFA code")
+		return
+	}
+	u.MFAEnabled = true
+	if err := a.Store.UpdateUser(r.Context(), u); err != nil {
+		writeErr(w, err)
+		return
+	}
+	a.audit(r, "mfa.enable", u.Username, "ok", "")
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (a *API) disableMFA(w http.ResponseWriter, r *http.Request) {
+	u := currentUser(r)
+	if u == nil || !u.MFAEnabled {
+		writeError(w, http.StatusBadRequest, "MFA is not enabled")
+		return
+	}
+	if a.Crypto == nil || !a.Crypto.CanOpen() {
+		writeError(w, http.StatusServiceUnavailable, "MFA key unavailable")
+		return
+	}
+	var body struct{ Password, Code string }
+	if !decode(w, r, &body) {
+		return
+	}
+	secret, err := a.Crypto.Open(u.MFASecretEnc)
+	if !auth.CheckPassword(u.PasswordHash, body.Password) || err != nil || !auth.VerifyTOTP(string(secret), body.Code, time.Now()) {
+		writeError(w, http.StatusUnauthorized, "password and valid MFA code required")
+		return
+	}
+	u.MFASecretEnc, u.MFAEnabled = nil, false
+	if err := a.Store.UpdateUser(r.Context(), u); err != nil {
+		writeErr(w, err)
+		return
+	}
+	a.audit(r, "mfa.disable", u.Username, "ok", "")
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (a *API) listSensorTokens(w http.ResponseWriter, r *http.Request) {
+	if _, err := a.Store.GetHost(r.Context(), r.PathValue("id")); err != nil {
+		writeErr(w, err)
+		return
+	}
+	tokens, err := a.Store.ListSensorTokens(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, tokens)
+}
+
+func (a *API) createSensorToken(w http.ResponseWriter, r *http.Request) {
+	hostID := r.PathValue("id")
+	if _, err := a.Store.GetHost(r.Context(), hostID); err != nil {
+		writeErr(w, err)
+		return
+	}
+	var body struct {
+		TTL string `json:"ttl"`
+	}
+	if r.ContentLength != 0 && !decode(w, r, &body) {
+		return
+	}
+	expires := time.Now().UTC().Add(90 * 24 * time.Hour)
+	if body.TTL != "" {
+		d, err := time.ParseDuration(body.TTL)
+		if err != nil || d < time.Hour || d > 366*24*time.Hour {
+			writeError(w, http.StatusBadRequest, "ttl must be between 1h and 8760h")
+			return
+		}
+		expires = time.Now().UTC().Add(d)
+	}
+	raw := auth.NewToken()
+	t := &store.SensorToken{HostID: hostID, TokenHash: auth.TokenDigest(raw), ExpiresAt: &expires}
+	if err := a.Store.CreateSensorToken(r.Context(), t); err != nil {
+		writeErr(w, err)
+		return
+	}
+	a.audit(r, "sensor.token.create", hostID, "ok", "token_id="+t.ID)
+	writeJSON(w, http.StatusCreated, map[string]any{"id": t.ID, "host_id": hostID, "token": raw, "expires_at": expires})
+}
+
+func (a *API) revokeSensorToken(w http.ResponseWriter, r *http.Request) {
+	if err := a.Store.RevokeSensorToken(r.Context(), r.PathValue("id"), r.PathValue("token")); err != nil {
+		writeErr(w, err)
+		return
+	}
+	a.audit(r, "sensor.token.revoke", r.PathValue("id"), "ok", "token_id="+r.PathValue("token"))
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // --- user management (admin-only, enforced by the middleware) ---

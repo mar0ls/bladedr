@@ -1,0 +1,382 @@
+openapi: 3.1.0
+info:
+  title: bladedr API
+  version: 1.0.0
+  description: Control-plane API for agentless scans, eBPF sensor events, triage, export, and administration.
+servers:
+  - url: /
+security:
+  - bearerAuth: []
+paths:
+  /healthz:
+    get: {security: [], operationId: health, responses: {'200': {description: Alive}}}
+  /readyz:
+    get: {security: [], operationId: readiness, responses: {'200': {description: Ready}, '503': {$ref: '#/components/responses/Error'}}}
+  /metrics:
+    get: {security: [], operationId: metrics, responses: {'200': {description: Prometheus metrics, content: {text/plain: {schema: {type: string}}}}}}
+  /api/v1/login:
+    post:
+      security: []
+      operationId: login
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/LoginRequest'}
+      responses:
+        '200': {description: Authenticated, content: {application/json: {schema: {$ref: '#/components/schemas/LoginResponse'}}}}
+        '401': {$ref: '#/components/responses/Error'}
+  /api/v1/logout:
+    post: {operationId: logout, responses: {'204': {description: Session revoked}}}
+  /api/v1/me:
+    get: {operationId: getCurrentUser, responses: {'200': {description: Current user, content: {application/json: {schema: {$ref: '#/components/schemas/User'}}}}}}
+  /api/v1/me/mfa/setup:
+    post: {operationId: setupMFA, requestBody: {$ref: '#/components/requestBodies/JSON'}, responses: {'200': {description: Pending TOTP enrollment}}}
+  /api/v1/me/mfa/confirm:
+    post: {operationId: confirmMFA, requestBody: {$ref: '#/components/requestBodies/JSON'}, responses: {'204': {description: MFA enabled}}}
+  /api/v1/me/mfa:
+    delete: {operationId: disableMFA, requestBody: {$ref: '#/components/requestBodies/JSON'}, responses: {'204': {description: MFA disabled}}}
+  /api/v1/hosts:
+    get:
+      operationId: listHosts
+      parameters:
+        - {name: tag, in: query, schema: {type: string}, description: Repeatable key=value filter}
+      responses: {'200': {description: Hosts, content: {application/json: {schema: {type: array, items: {$ref: '#/components/schemas/Host'}}}}}}
+    post:
+      operationId: createHost
+      requestBody: {$ref: '#/components/requestBodies/JSON'}
+      responses: {'201': {description: Host created, content: {application/json: {schema: {$ref: '#/components/schemas/Host'}}}}}
+  /api/v1/hosts/{id}:
+    parameters: [{$ref: '#/components/parameters/Id'}]
+    get: {operationId: getHost, responses: {'200': {description: Host, content: {application/json: {schema: {$ref: '#/components/schemas/Host'}}}}, '404': {$ref: '#/components/responses/Error'}}}
+    patch: {operationId: updateHost, requestBody: {$ref: '#/components/requestBodies/JSON'}, responses: {'200': {description: Host updated}}}
+    delete: {operationId: deleteHost, responses: {'204': {description: Host deleted}}}
+  /api/v1/hosts/{id}/scans:
+    parameters: [{$ref: '#/components/parameters/Id'}]
+    get: {operationId: listHostScans, responses: {'200': {description: Scans, content: {application/json: {schema: {type: array, items: {$ref: '#/components/schemas/Scan'}}}}}}}
+    post: {operationId: enqueueScan, responses: {'202': {description: Scan queued, headers: {Location: {schema: {type: string}}}, content: {application/json: {schema: {$ref: '#/components/schemas/ScanJob'}}}}}}
+  /api/v1/scans/{id}:
+    parameters: [{$ref: '#/components/parameters/Id'}]
+    get: {operationId: getScan, responses: {'200': {description: Scan, content: {application/json: {schema: {$ref: '#/components/schemas/Scan'}}}}}}
+  /api/v1/scan-jobs:
+    get:
+      operationId: listScanJobs
+      parameters: [{$ref: '#/components/parameters/HostQuery'}, {$ref: '#/components/parameters/Limit'}]
+      responses: {'200': {description: Scan jobs, content: {application/json: {schema: {type: array, items: {$ref: '#/components/schemas/ScanJob'}}}}}}
+  /api/v1/scan-jobs/{id}:
+    parameters: [{$ref: '#/components/parameters/Id'}]
+    get: {operationId: getScanJob, responses: {'200': {description: Scan job, content: {application/json: {schema: {$ref: '#/components/schemas/ScanJob'}}}}}}
+  /api/v1/hosts/{id}/baseline:
+    parameters: [{$ref: '#/components/parameters/Id'}]
+    get: {operationId: getBaseline, responses: {'200': {description: Baseline}}}
+    delete: {operationId: resetBaseline, responses: {'204': {description: Baseline reset}}}
+  /api/v1/hosts/{id}/sensor:
+    parameters: [{$ref: '#/components/parameters/Id'}]
+    post: {operationId: controlSensor, requestBody: {$ref: '#/components/requestBodies/JSON'}, responses: {'200': {description: Sensor state changed}}}
+  /api/v1/hosts/{id}/sensor-tokens:
+    parameters: [{$ref: '#/components/parameters/Id'}]
+    get: {operationId: listSensorTokens, responses: {'200': {description: Sensor token metadata}}}
+    post: {operationId: createSensorToken, requestBody: {$ref: '#/components/requestBodies/JSON'}, responses: {'201': {description: Token returned once}}}
+  /api/v1/hosts/{id}/sensor-tokens/{token}:
+    parameters: [{$ref: '#/components/parameters/Id'}, {name: token, in: path, required: true, schema: {type: string, format: uuid}}]
+    delete: {operationId: revokeSensorToken, responses: {'204': {description: Token revoked}}}
+  /api/v1/hosts/{id}/events:
+    parameters: [{$ref: '#/components/parameters/Id'}]
+    post:
+      operationId: ingestSensorEvents
+      description: Requires a sensor bearer token bound to the host in the path, or an operator session. Maximum 500 events and 4 MiB.
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: array, maxItems: 500, items: {$ref: '#/components/schemas/Observation'}}}}
+      responses: {'200': {description: Batch accepted}, '413': {$ref: '#/components/responses/Error'}}
+  /api/v1/credentials:
+    get: {operationId: listCredentials, responses: {'200': {description: Credential metadata}}}
+    post: {operationId: createCredential, requestBody: {$ref: '#/components/requestBodies/JSON'}, responses: {'201': {description: Credential created}}}
+  /api/v1/credentials/{id}:
+    parameters: [{$ref: '#/components/parameters/Id'}]
+    delete: {operationId: deleteCredential, responses: {'204': {description: Credential deleted}}}
+  /api/v1/observations:
+    get:
+      operationId: listObservations
+      parameters:
+        - {$ref: '#/components/parameters/HostQuery'}
+        - {name: severity, in: query, schema: {type: string, enum: [info, low, medium, high, critical]}}
+        - {name: status, in: query, schema: {$ref: '#/components/schemas/ObservationStatus'}}
+        - {name: source, in: query, schema: {type: string}}
+        - {name: rule, in: query, schema: {type: string}}
+        - {name: q, in: query, schema: {type: string}}
+        - {$ref: '#/components/parameters/Limit'}
+        - {$ref: '#/components/parameters/Cursor'}
+      responses:
+        '200':
+          description: Findings ordered by last_seen descending
+          headers: {X-Next-Cursor: {schema: {type: string}}}
+          content: {application/json: {schema: {type: array, items: {$ref: '#/components/schemas/Observation'}}}}
+  /api/v1/observations/{id}:
+    parameters: [{$ref: '#/components/parameters/Id'}]
+    get: {operationId: getObservation, responses: {'200': {description: Observation, content: {application/json: {schema: {$ref: '#/components/schemas/Observation'}}}}}}
+    patch: {operationId: triageObservation, requestBody: {$ref: '#/components/requestBodies/JSON'}, responses: {'200': {description: Observation updated}}}
+  /api/v1/observations/bulk:
+    post: {operationId: bulkTriageObservations, requestBody: {$ref: '#/components/requestBodies/JSON'}, responses: {'200': {description: Bulk triage result}}}
+  /api/v1/rules:
+    get: {operationId: listRules, responses: {'200': {description: User rules}}}
+    post: {operationId: createRule, requestBody: {required: true, content: {application/yaml: {schema: {type: string}}, text/yaml: {schema: {type: string}}}}, responses: {'201': {description: Rule created}}}
+  /api/v1/rules/active:
+    get: {operationId: listActiveRules, responses: {'200': {description: Merged active rules}}}
+  /api/v1/rules/{id}:
+    parameters: [{$ref: '#/components/parameters/Id'}]
+    patch: {operationId: updateRule, requestBody: {$ref: '#/components/requestBodies/JSON'}, responses: {'204': {description: Rule updated}}}
+    delete: {operationId: deleteRule, responses: {'204': {description: Rule override deleted}}}
+  /api/v1/policies:
+    get: {operationId: listPolicies, responses: {'200': {description: eBPF policy catalog}}}
+  /api/v1/schedules:
+    get: {operationId: listSchedules, responses: {'200': {description: Schedules}}}
+    post: {operationId: createSchedule, requestBody: {$ref: '#/components/requestBodies/JSON'}, responses: {'201': {description: Schedule created}}}
+  /api/v1/schedules/{id}:
+    parameters: [{$ref: '#/components/parameters/Id'}]
+    get: {operationId: getSchedule, responses: {'200': {description: Schedule}}}
+    patch: {operationId: updateSchedule, requestBody: {$ref: '#/components/requestBodies/JSON'}, responses: {'200': {description: Schedule updated}}}
+    delete: {operationId: deleteSchedule, responses: {'204': {description: Schedule deleted}}}
+  /api/v1/schedules/{id}/run:
+    parameters: [{$ref: '#/components/parameters/Id'}]
+    post: {operationId: runScheduleNow, responses: {'202': {description: Scan jobs queued}}}
+  /api/v1/collections:
+    get: {operationId: listCollections, responses: {'200': {description: Collections}}}
+    post: {operationId: createCollection, requestBody: {$ref: '#/components/requestBodies/JSON'}, responses: {'201': {description: Collection created}}}
+  /api/v1/collections/{id}:
+    parameters: [{$ref: '#/components/parameters/Id'}]
+    get: {operationId: getCollection, responses: {'200': {description: Collection}}}
+    patch: {operationId: updateCollection, requestBody: {$ref: '#/components/requestBodies/JSON'}, responses: {'200': {description: Collection updated}}}
+    delete: {operationId: deleteCollection, responses: {'204': {description: Collection deleted}}}
+  /api/v1/collections/{id}/hosts:
+    parameters: [{$ref: '#/components/parameters/Id'}]
+    get: {operationId: listCollectionHosts, responses: {'200': {description: Collection hosts}}}
+  /api/v1/collections/{id}/members/{host}:
+    parameters: [{$ref: '#/components/parameters/Id'}, {name: host, in: path, required: true, schema: {type: string, format: uuid}}]
+    put: {operationId: addCollectionMember, responses: {'204': {description: Member added}}}
+    delete: {operationId: removeCollectionMember, responses: {'204': {description: Member removed}}}
+  /api/v1/export/ecs:
+    get: {operationId: exportECS, responses: {'200': {description: ECS NDJSON, content: {application/x-ndjson: {schema: {type: string}}}}}}
+  /api/v1/export-targets:
+    get: {operationId: listExportTargets, responses: {'200': {description: Export targets}}}
+    post: {operationId: createExportTarget, requestBody: {$ref: '#/components/requestBodies/JSON'}, responses: {'201': {description: Export target created}}}
+  /api/v1/export-targets/{id}:
+    parameters: [{$ref: '#/components/parameters/Id'}]
+    get: {operationId: getExportTarget, responses: {'200': {description: Export target}}}
+    patch: {operationId: updateExportTarget, requestBody: {$ref: '#/components/requestBodies/JSON'}, responses: {'200': {description: Export target updated}}}
+    delete: {operationId: deleteExportTarget, responses: {'204': {description: Export target deleted}}}
+  /api/v1/export-dlq:
+    get: {operationId: listExportDLQ, responses: {'200': {description: Dead export deliveries}}}
+  /api/v1/export-dlq/{id}/retry:
+    parameters: [{$ref: '#/components/parameters/Id'}]
+    post: {operationId: retryExportDelivery, responses: {'202': {description: Delivery requeued}}}
+  /api/v1/risk/stats:
+    get: {operationId: getRiskStats, responses: {'200': {description: Risk-model validation statistics}}}
+  /api/v1/risk/observations:
+    get: {operationId: listRiskRankedObservations, responses: {'200': {description: Risk-ranked findings}}}
+  /api/v1/users:
+    get: {operationId: listUsers, responses: {'200': {description: Users}}}
+    post: {operationId: createUser, requestBody: {$ref: '#/components/requestBodies/JSON'}, responses: {'201': {description: User created}}}
+  /api/v1/users/{id}:
+    parameters: [{$ref: '#/components/parameters/Id'}]
+    patch: {operationId: updateUser, requestBody: {$ref: '#/components/requestBodies/JSON'}, responses: {'200': {description: User updated}}}
+    delete: {operationId: deleteUser, responses: {'204': {description: User deleted}}}
+  /api/v1/audit:
+    get:
+      operationId: listAudit
+      parameters: [{$ref: '#/components/parameters/Limit'}, {$ref: '#/components/parameters/Cursor'}]
+      responses:
+        '200':
+          description: Audit events
+          headers:
+            X-Next-Cursor: {schema: {type: string}}
+  /api/v1/archive:
+    get:
+      operationId: listArchive
+      parameters: [{name: kind, in: query, schema: {type: string, enum: [observation, scan, audit]}}, {$ref: '#/components/parameters/Limit'}]
+      responses:
+        '200': {description: Archived records}
+  /api/v1/retention:
+    get: {operationId: getRetentionPolicy, responses: {'200': {description: Active retention policy}}}
+  /api/v1/retention/run:
+    post: {operationId: runRetention, responses: {'200': {description: Retention result}}}
+  /api/v1/responses:
+    get:
+      operationId: listResponseActions
+      parameters: [{$ref: '#/components/parameters/HostQuery'}, {$ref: '#/components/parameters/Limit'}]
+      responses: {'200': {description: Response actions, content: {application/json: {schema: {type: array, items: {$ref: '#/components/schemas/ResponseAction'}}}}}}
+    post:
+      operationId: requestResponseAction
+      description: Creates a pending action. Dry-run defaults to true; execution always requires separate admin approval.
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/ResponseRequest'}}}
+      responses: {'201': {description: Response action pending approval, content: {application/json: {schema: {$ref: '#/components/schemas/ResponseAction'}}}}}
+  /api/v1/responses/{id}:
+    parameters: [{$ref: '#/components/parameters/Id'}]
+    get: {operationId: getResponseAction, responses: {'200': {description: Response action, content: {application/json: {schema: {$ref: '#/components/schemas/ResponseAction'}}}}}}
+  /api/v1/responses/{id}/approve:
+    parameters: [{$ref: '#/components/parameters/Id'}]
+    post:
+      operationId: approveResponseAction
+      description: >-
+        Admin-only approval under two-person control: the approver must differ from the requester.
+        A self-approval is refused with 409 and recorded in the audit log. Set
+        BLADEDR_RESPONSE_ALLOW_SELF_APPROVAL to relax this for single-administrator deployments.
+        The response worker executes approved actions using the host's pinned SSH transport.
+      responses:
+        '202': {description: Approved and queued, content: {application/json: {schema: {$ref: '#/components/schemas/ResponseAction'}}}}
+        '409': {description: The approver is the requester and self-approval is disabled}
+  /api/v1/responses/{id}/reject:
+    parameters: [{$ref: '#/components/parameters/Id'}]
+    post:
+      operationId: rejectResponseAction
+      description: >-
+        Admin-only rejection. Closes a pending action without contacting the host; the state is
+        terminal and the action can no longer be approved. The requester may reject their own request.
+      requestBody:
+        required: false
+        content: {application/json: {schema: {type: object, properties: {reason: {type: string, maxLength: 1000}}}}}
+      responses:
+        '200': {description: Rejected, content: {application/json: {schema: {$ref: '#/components/schemas/ResponseAction'}}}}
+        '404': {description: No pending action with that id}
+components:
+  securitySchemes:
+    bearerAuth: {type: http, scheme: bearer, bearerFormat: opaque}
+  parameters:
+    Id: {name: id, in: path, required: true, schema: {type: string}}
+    HostQuery: {name: host, in: query, schema: {type: string, format: uuid}}
+    Limit: {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 500, default: 100}}
+    Cursor: {name: cursor, in: query, schema: {type: string}, description: Opaque cursor returned in X-Next-Cursor}
+  requestBodies:
+    JSON:
+      required: true
+      content: {application/json: {schema: {type: object, additionalProperties: true}}}
+  responses:
+    Error:
+      description: Error
+      content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties: {error: {type: string}}
+    LoginRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username: {type: string}
+        password: {type: string, format: password}
+        otp: {type: string, pattern: '^[0-9]{6}$'}
+    LoginResponse:
+      type: object
+      required: [token, username, role]
+      properties:
+        token: {type: string}
+        username: {type: string}
+        role: {type: string, enum: [admin, operator, viewer]}
+    User:
+      type: object
+      required: [id, username, role, disabled, mfa_enabled, created_at]
+      properties:
+        id: {type: string, format: uuid}
+        username: {type: string}
+        role: {type: string, enum: [admin, operator, viewer]}
+        disabled: {type: boolean}
+        mfa_enabled: {type: boolean}
+        created_at: {type: string, format: date-time}
+    Host:
+      type: object
+      required: [id, mode, status]
+      properties:
+        id: {type: string, format: uuid}
+        hostname: {type: string}
+        primary_ip: {type: string}
+        ssh_port: {type: integer}
+        credential_id: {type: string, format: uuid}
+        ssh_host_key: {type: string}
+        os_name: {type: string}
+        os_version: {type: string}
+        kernel: {type: string}
+        arch: {type: string, enum: [amd64, arm64]}
+        mode: {type: string, enum: [scan_only, scan_plus_sensor]}
+        status: {type: string, enum: [pending, online, unreachable, disabled]}
+        tags: {type: object, additionalProperties: {type: string}}
+        last_seen: {type: [string, 'null'], format: date-time}
+        created_at: {type: string, format: date-time}
+    Scan:
+      type: object
+      properties:
+        id: {type: string, format: uuid}
+        host_id: {type: string, format: uuid}
+        trigger: {type: string, enum: [scheduled, manual, api]}
+        status: {type: string, enum: [running, ok, partial, failed]}
+        probe_version: {type: string}
+        started_at: {type: string, format: date-time}
+        finished_at: {type: [string, 'null'], format: date-time}
+        duration_ms: {type: integer}
+        error: {type: string}
+        risk_score: {type: integer}
+    ScanJob:
+      type: object
+      properties:
+        id: {type: string, format: uuid}
+        host_id: {type: string, format: uuid}
+        trigger: {type: string, enum: [scheduled, manual, api]}
+        status: {type: string, enum: [queued, running, succeeded, failed]}
+        attempts: {type: integer}
+        max_attempts: {type: integer}
+        lease_until: {type: [string, 'null'], format: date-time}
+        next_attempt_at: {type: string, format: date-time}
+        scan_id: {type: string, format: uuid}
+        error: {type: string}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    ResponseRequest:
+      type: object
+      required: [host_id, playbook]
+      properties:
+        host_id: {type: string, format: uuid}
+        playbook: {type: string, enum: [kill_process, disable_systemd_unit, isolate_host, restore_network]}
+        params: {type: object, additionalProperties: {type: string}}
+        dry_run: {type: boolean, default: true}
+    ResponseAction:
+      allOf:
+        - {$ref: '#/components/schemas/ResponseRequest'}
+        - type: object
+          required: [id, status, requested_by, created_at, updated_at]
+          properties:
+            id: {type: string, format: uuid}
+            status: {type: string, enum: [pending, approved, rejected, running, succeeded, failed]}
+            requested_by: {type: string}
+            approved_by: {type: string, description: Always a different account from requested_by unless self-approval is explicitly enabled.}
+            rejected_by: {type: string}
+            reject_reason: {type: string}
+            output: {type: string}
+            error: {type: string}
+            created_at: {type: string, format: date-time}
+            approved_at: {type: [string, 'null'], format: date-time}
+            rejected_at: {type: [string, 'null'], format: date-time}
+            started_at: {type: [string, 'null'], format: date-time}
+            finished_at: {type: [string, 'null'], format: date-time}
+            updated_at: {type: string, format: date-time}
+    ObservationStatus: {type: string, enum: [open, acknowledged, resolved, false_positive]}
+    Observation:
+      type: object
+      properties:
+        id: {type: string, format: uuid}
+        host_id: {type: string, format: uuid}
+        scan_id: {type: string, format: uuid}
+        source: {type: string, enum: [agentless_probe, ebpf_sensor, baseline, fleet]}
+        rule_id: {type: string}
+        category: {type: string}
+        title: {type: string}
+        severity: {type: string, enum: [info, low, medium, high, critical]}
+        score: {type: integer}
+        mitre: {type: array, items: {type: string}}
+        evidence: {type: object, additionalProperties: true}
+        dedup_key: {type: string}
+        status: {$ref: '#/components/schemas/ObservationStatus'}
+        first_seen: {type: string, format: date-time}
+        last_seen: {type: string, format: date-time}
+        count: {type: integer}

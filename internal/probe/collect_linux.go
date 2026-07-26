@@ -95,10 +95,10 @@ func Collect() (*Snapshot, error) {
 	s.Facts["core_pattern"] = strings.TrimSpace(readFile("/proc/sys/kernel/core_pattern"))
 	s.Facts["docker_sock"] = dockerSockExposed()
 	s.Facts["kernel_lockdown"] = parseLockdown(readFile("/sys/kernel/security/lockdown"))
-	// Yama ptrace_scope: surface the runtime value as a fact ONLY when 0 is a
-	// genuine weakening, not the distro default. RHEL/Fedora ship ptrace_scope=0 as
-	// their vendor default (Debian/Ubuntu ship 1); flagging that everywhere is pure
-	// noise. So a runtime 0 that matches the vendor-shipped default is suppressed.
+	// Yama ptrace_scope: surface the runtime value as a fact only when 0 is a genuine
+	// weakening, not the distro default. RHEL/Fedora ship ptrace_scope=0 as their
+	// vendor default (Debian/Ubuntu ship 1); flagging that everywhere is pure noise.
+	// So a runtime 0 that matches the vendor-shipped default is suppressed.
 	if v, err := strconv.Atoi(strings.TrimSpace(readFile("/proc/sys/kernel/yama/ptrace_scope"))); err == nil {
 		if !(v == 0 && yamaVendorDefault() == 0) {
 			s.Facts["yama_ptrace_scope"] = v
@@ -244,7 +244,7 @@ func collectKernelLog(errs *[]string) []KernelLogEntry {
 	}
 	// /dev/kmsg streams oldest->newest; on a long-uptime host the buffer holds far
 	// more than maxRecords, and the security-relevant events (a fresh promiscuous-mode
-	// enter, an exploit segfault, a module taint) are the NEWEST. Keep the tail, not
+	// enter, an exploit segfault, a module taint) are the newest. Keep the tail, not
 	// the head, so we don't miss recent events behind days of old boot spam.
 	if len(out) > maxRecords {
 		out = out[len(out)-maxRecords:]
@@ -381,11 +381,11 @@ func collectHiddenPIDs() []int {
 		return nil
 	}
 	// Re-verify each candidate to kill race-condition false positives, common on busy
-	// container hosts. A genuinely rootkit-hidden process is STILL ALIVE (stat-
-	// accessible as a process) yet STILL ABSENT from the /proc readdir. So a candidate
-	// only counts if, on the second pass, it is both (a) still not listed AND (b) still
-	// a live process. This drops: a process that STARTED mid-scan (now listed) and a
-	// transient process that EXITED mid-scan (no longer stat-accessible) — the latter
+	// container hosts. A genuinely rootkit-hidden process is still alive (stat-
+	// accessible as a process) yet still absent from the /proc readdir. So a candidate
+	// only counts if, on the second pass, it is both (a) still not listed and (b) still
+	// a live process. This drops a process that started mid-scan (now listed) and a
+	// transient process that exited mid-scan (no longer stat-accessible) — the latter
 	// being the FP the first re-read missed.
 	after := readProcPidSet()
 	var hidden []int
@@ -1198,8 +1198,8 @@ func collectWritablePersistence() []string {
 			files = append(files, m...)
 		}
 	}
-	// Persistence DIRECTORIES: if a non-root user can write the dir itself, they
-	// can drop a new root-executed unit/cron/sudoers entry into it.
+	// Persistence directories: if a non-root user can write the dir itself, they can
+	// drop a new root-executed unit/cron/sudoers entry into it.
 	dirs := []string{
 		"/etc/systemd/system", "/etc/cron.d", "/etc/cron.hourly", "/etc/cron.daily",
 		"/etc/cron.weekly", "/etc/cron.monthly", "/etc/sudoers.d", "/etc/init.d",
@@ -1737,9 +1737,9 @@ func collectUnverifiedRepos() []string {
 
 // collectSysctlHardening scans sysctl config for lines that persistently disable
 // a kernel hardening control (the config-file counterpart of the runtime Yama
-// check). Only ADMIN-intent locations are scanned: /etc/sysctl.conf, /etc/sysctl.d
+// check). Only admin-intent locations are scanned: /etc/sysctl.conf, /etc/sysctl.d
 // and the runtime /run/sysctl.d. Vendor dirs (/usr/lib/sysctl.d, /lib/sysctl.d) are
-// deliberately excluded — they hold distro DEFAULTS, and RHEL/Fedora ship
+// deliberately excluded — they hold distro defaults, and RHEL/Fedora ship
 // kernel.yama.ptrace_scope=0 there by default (10-default-yama-scope.conf), which
 // is not "someone disabling hardening" (it caused a false positive on every
 // RHEL-family host, doubled by the /lib -> /usr/lib symlink).

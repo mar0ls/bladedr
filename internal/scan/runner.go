@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"bladedr/internal/auth"
 	"bladedr/internal/probe"
 	"bladedr/internal/rules"
 	"bladedr/internal/store"
@@ -39,7 +40,6 @@ type Runner struct {
 	SensorBins         map[string][]byte
 	PolicyTar          []byte
 	ServerURL          string
-	IngestToken        string
 	NewSensorTransport func(h *store.Host) (*SSHTransport, string, error)
 }
 
@@ -64,8 +64,20 @@ func (r *Runner) EnableSensor(ctx context.Context, host *store.Host) error {
 	if err != nil {
 		return err
 	}
-	if err := t.DeploySensor(ctx, bin, r.PolicyTar, r.ServerURL, host.ID, r.IngestToken, pw); err != nil {
+	rawToken := auth.NewToken()
+	expires := time.Now().UTC().Add(90 * 24 * time.Hour)
+	credential := &store.SensorToken{HostID: host.ID, TokenHash: auth.TokenDigest(rawToken), ExpiresAt: &expires}
+	if err := r.Store.CreateSensorToken(ctx, credential); err != nil {
+		return fmt.Errorf("create per-host sensor credential: %w", err)
+	}
+	if err := t.DeploySensor(ctx, bin, r.PolicyTar, r.ServerURL, host.ID, rawToken, pw); err != nil {
+		_ = r.Store.RevokeSensorToken(ctx, host.ID, credential.ID)
 		return err
+	}
+	// Keep the previous credential valid until the new deployment succeeds, then
+	// revoke it. This gives rotations no authentication gap.
+	if err := r.Store.RevokeOtherSensorTokens(ctx, host.ID, credential.ID); err != nil {
+		return fmt.Errorf("revoke superseded sensor credentials: %w", err)
 	}
 	host.Mode = "scan_plus_sensor"
 	return r.Store.UpdateHost(ctx, host)
@@ -80,6 +92,9 @@ func (r *Runner) DisableSensor(ctx context.Context, host *store.Host) error {
 				log.Printf("sensor: stop on %s: %v", host.ID, err)
 			}
 		}
+	}
+	if err := r.Store.RevokeSensorTokens(ctx, host.ID); err != nil {
+		return err
 	}
 	host.Mode = "scan_only"
 	return r.Store.UpdateHost(ctx, host)
@@ -179,9 +194,7 @@ var baselineCategory = map[string]string{
 	probe.DigestSystemdUnits:   "persistence",
 }
 
-// categoryMitre maps a digest category to the ATT&CK technique a NEW/RARE item of
-// that kind most plausibly represents, so anomaly findings (baseline drift, fleet
-// rarity) carry a MITRE ID too instead of showing blank in the UI.
+// categoryMitre maps baseline and fleet digest categories to ATT&CK techniques.
 var categoryMitre = map[string][]string{
 	probe.DigestListeningPorts: {"T1571"},
 	probe.DigestKernelModules:  {"T1547.006"},

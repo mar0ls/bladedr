@@ -35,7 +35,7 @@ func TestSchedulesCRUDAndRun(t *testing.T) {
 		t.Fatal("patch enabled=false did not persist")
 	}
 	// Run with no hosts in the fleet: triggers zero scans but exercises the handler.
-	if w := do(a, "POST", "/api/v1/schedules/"+s.ID+"/run", admin, nil); w.Code != http.StatusOK {
+	if w := do(a, "POST", "/api/v1/schedules/"+s.ID+"/run", admin, nil); w.Code != http.StatusAccepted {
 		t.Fatalf("run schedule = %d", w.Code)
 	}
 	if w := do(a, "DELETE", "/api/v1/schedules/"+s.ID, admin, nil); w.Code != http.StatusNoContent {

@@ -1,11 +1,12 @@
-.PHONY: build build-probe-linux test vet run demo clean tidy deploy stop migrate
+.PHONY: build build-probe-linux test vet run demo clean tidy deploy stop migrate sensor lab
 
 BIN := bin
 LDFLAGS :=
 
-build: ## Build server + probe for the host platform
+build: ## Build server, probe and CLI for the host platform
 	go build -o $(BIN)/bladedr-server ./cmd/bladedr-server
 	go build -o $(BIN)/bladedr-probe  ./cmd/bladedr-probe
+	go build -o $(BIN)/bladectl       ./cmd/bladectl
 
 build-probe-linux: ## Cross-compile the static probe for Linux targets
 	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o $(BIN)/bladedr-probe.linux-amd64 ./cmd/bladedr-probe
@@ -31,7 +32,8 @@ demo: build ## Run an end-to-end demo scan against the bundled malicious snapsho
 	  sleep 1; \
 	  TOK=$$(curl -fsS -X POST localhost:18080/api/v1/login -H 'content-type: application/json' -d '{"Username":"admin","Password":"demo"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])'); \
 	  HID=$$(curl -fsS -H "Authorization: Bearer $$TOK" -X POST localhost:18080/api/v1/hosts -H 'content-type: application/json' -d '{"hostname":"web-01","primary_ip":"10.0.0.5"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])'); \
-	  curl -fsS -H "Authorization: Bearer $$TOK" -X POST localhost:18080/api/v1/hosts/$$HID/scans | python3 -m json.tool; \
+	  JOB=$$(curl -fsS -H "Authorization: Bearer $$TOK" -X POST localhost:18080/api/v1/hosts/$$HID/scans | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])'); \
+	  while true; do STATUS=$$(curl -fsS -H "Authorization: Bearer $$TOK" localhost:18080/api/v1/scan-jobs/$$JOB | python3 -c 'import sys,json;print(json.load(sys.stdin)["status"])'); case $$STATUS in succeeded) break;; failed) echo "scan failed"; exit 1;; esac; sleep .2; done; \
 	  echo "--- observations ---"; \
 	  curl -fsS -H "Authorization: Bearer $$TOK" "localhost:18080/api/v1/observations?host=$$HID" | python3 -m json.tool; \
 	  pkill -f bladedr-server

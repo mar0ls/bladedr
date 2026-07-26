@@ -48,8 +48,22 @@ HID=$(curl -fsS -H "Authorization: Bearer $TOKEN" -X POST "$BASE/api/v1/hosts" \
 	| python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])') || fail "create host failed"
 
 echo "==> scan"
-curl -fsS -H "Authorization: Bearer $TOKEN" -X POST "$BASE/api/v1/hosts/$HID/scans" >/dev/null \
-	|| fail "scan request failed"
+JOB=$(curl -fsS -H "Authorization: Bearer $TOKEN" -X POST "$BASE/api/v1/hosts/$HID/scans" \
+	| python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])') || fail "scan request failed"
+
+echo "==> wait for scan job $JOB"
+for i in $(seq 1 100); do
+	STATUS=$(curl -fsS -H "Authorization: Bearer $TOKEN" "$BASE/api/v1/scan-jobs/$JOB" \
+		| python3 -c 'import sys,json;print(json.load(sys.stdin)["status"])') || fail "scan status failed"
+	case "$STATUS" in
+	succeeded) break ;;
+	failed) fail "scan job failed" ;;
+	queued|running) ;;
+	*) fail "unexpected scan status: $STATUS" ;;
+	esac
+	[ "$i" = 100 ] && fail "scan job timed out"
+	sleep 0.1
+done
 
 echo "==> observations"
 N=$(curl -fsS -H "Authorization: Bearer $TOKEN" "$BASE/api/v1/observations?host=$HID" \

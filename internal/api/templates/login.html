@@ -21,6 +21,7 @@
     <div class="sub">agentless + eBPF threat hunting</div>
     <label>Username</label><input id="u" autofocus autocomplete="username">
     <label>Password</label><input id="p" type="password" autocomplete="current-password">
+    <label>Authenticator code <span class="sub">(if enabled)</span></label><input id="otp" inputmode="numeric" autocomplete="one-time-code" maxlength="6" pattern="[0-9]{6}">
     <button type="submit">Sign in</button>
     <div class="err" id="err"></div>
   </form>
@@ -28,8 +29,8 @@
 function signin(e){
   e.preventDefault();
   fetch('/api/v1/login',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({Username:document.getElementById('u').value,Password:document.getElementById('p').value})})
-    .then(function(r){ if(r.ok){location.href='/ui';} else {document.getElementById('err').textContent='Invalid credentials';} })
+    body:JSON.stringify({Username:document.getElementById('u').value,Password:document.getElementById('p').value,OTP:document.getElementById('otp').value})})
+    .then(function(r){ if(r.ok){location.href='/ui';} else {return r.json().catch(function(){return {};}).then(function(x){document.getElementById('err').textContent=x.mfa_required?'Valid authenticator code required':'Invalid credentials';});} })
     .catch(function(){document.getElementById('err').textContent='network error';});
   return false;
 }

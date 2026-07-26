@@ -2,25 +2,40 @@ package main
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
-	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"bladedr/internal/store"
 )
 
+type postRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f postRoundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func withDefaultTransport(t *testing.T, fn postRoundTripFunc) {
+	t.Helper()
+	original := http.DefaultClient
+	http.DefaultClient = &http.Client{Transport: fn}
+	t.Cleanup(func() { http.DefaultClient = original })
+}
+
+func response(status int) *http.Response {
+	return &http.Response{StatusCode: status, Status: http.StatusText(status), Body: io.NopCloser(strings.NewReader("")), Header: make(http.Header)}
+}
+
 func TestPostSendsBatchWithBearer(t *testing.T) {
 	var gotAuth, gotPath string
 	var gotBody []*store.Observation
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	withDefaultTransport(t, func(r *http.Request) (*http.Response, error) {
 		gotAuth = r.Header.Get("Authorization")
 		gotPath = r.URL.Path
 		_ = json.NewDecoder(r.Body).Decode(&gotBody)
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer srv.Close()
+		return response(http.StatusOK), nil
+	})
 
-	if err := post(srv.URL, "host-1", "tok", []*store.Observation{{RuleID: "r"}}); err != nil {
+	if err := post("https://control.example", "host-1", "tok", []*store.Observation{{RuleID: "r"}}); err != nil {
 		t.Fatal(err)
 	}
 	if gotAuth != "Bearer tok" {
@@ -36,12 +51,11 @@ func TestPostSendsBatchWithBearer(t *testing.T) {
 
 func TestPostOmitsAuthWithoutToken(t *testing.T) {
 	var gotAuth string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	withDefaultTransport(t, func(r *http.Request) (*http.Response, error) {
 		gotAuth = r.Header.Get("Authorization")
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer srv.Close()
-	if err := post(srv.URL, "h", "", []*store.Observation{{RuleID: "r"}}); err != nil {
+		return response(http.StatusOK), nil
+	})
+	if err := post("https://control.example", "h", "", []*store.Observation{{RuleID: "r"}}); err != nil {
 		t.Fatal(err)
 	}
 	if gotAuth != "" {
@@ -50,11 +64,10 @@ func TestPostOmitsAuthWithoutToken(t *testing.T) {
 }
 
 func TestPostErrorsOnServerError(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-	}))
-	defer srv.Close()
-	if err := post(srv.URL, "h", "", []*store.Observation{{RuleID: "r"}}); err == nil {
+	withDefaultTransport(t, func(*http.Request) (*http.Response, error) {
+		return response(http.StatusInternalServerError), nil
+	})
+	if err := post("https://control.example", "h", "", []*store.Observation{{RuleID: "r"}}); err == nil {
 		t.Fatal("post should return an error on a 5xx response")
 	}
 }

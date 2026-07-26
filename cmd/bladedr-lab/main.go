@@ -1,6 +1,6 @@
 // Command bladedr-lab is the attack-emulation range orchestrator. It plants each
 // EDR-T technique from poligon/manifest.yaml (in an "obvious" and a "stealthy"
-// naming variant), runs the REAL bladedr probe after each plant, diffs the findings
+// naming variant), runs the bladedr probe after each plant, diffs the findings
 // against a clean baseline, and labels the new findings by technique. Output: a
 // labelled dataset (dataset.jsonl) for the ML risk model, plus a detection-coverage
 // report (which rules actually fire on a live host).

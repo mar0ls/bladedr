@@ -27,6 +27,7 @@ import (
 
 	"bladedr/internal/api"
 	"bladedr/internal/auth"
+	exportworker "bladedr/internal/export"
 	"bladedr/internal/rules"
 	"bladedr/internal/scan"
 	"bladedr/internal/secrets"
@@ -105,15 +106,6 @@ func main() {
 		return rules.Merge(baseRules, dbRules), nil
 	}
 
-	// BLADEDR_INGEST_TOKEN may be a comma-separated list to rotate without downtime:
-	// the API accepts any listed token, while sensors are deployed with the primary
-	// (first) one.
-	ingestTokens := os.Getenv("BLADEDR_INGEST_TOKEN")
-	primaryIngestToken := ingestTokens
-	if i := strings.IndexByte(ingestTokens, ','); i >= 0 {
-		primaryIngestToken = strings.TrimSpace(ingestTokens[:i])
-	}
-
 	runner := &scan.Runner{
 		Store:              st,
 		LoadRules:          loadActiveRules,
@@ -121,12 +113,21 @@ func main() {
 		SensorBins:         loadSensorBinaries(),
 		PolicyTar:          loadPolicyTar(),
 		ServerURL:          os.Getenv("BLADEDR_SERVER_URL"),
-		IngestToken:        primaryIngestToken,
 		NewSensorTransport: sensorTransportFactory(ctx, st, crypto, loadProbeBinaries()),
+	}
+	queue := &scan.Queue{Store: st, Runner: runner, Workers: scanWorkers(), ScanTimeout: scanTimeout()}
+	go queue.Run(ctx)
+	responses := &scan.ResponseQueue{Store: st, Runner: runner}
+	go responses.Run(ctx)
+	exporter := &exportworker.Worker{Store: st, Crypto: crypto, Workers: exportWorkers()}
+	go exporter.Run(ctx)
+	retention := retentionPolicy()
+	if retention != (store.RetentionPolicy{}) {
+		go runRetention(ctx, st, retention)
 	}
 
 	// Background scheduler: fires due recurring scans from the store.
-	scheduler := &scan.Scheduler{Store: st, Runner: runner, Tick: schedulerTick(), ScanTimeout: scanTimeout()}
+	scheduler := &scan.Scheduler{Store: st, Queue: queue, Tick: schedulerTick()}
 	go scheduler.Run(ctx)
 
 	// Session housekeeping: expired sessions are already rejected on use, but this
@@ -140,16 +141,17 @@ func main() {
 	tlsCert, tlsKey := os.Getenv("BLADEDR_TLS_CERT"), os.Getenv("BLADEDR_TLS_KEY")
 	tlsOn := tlsCert != "" && tlsKey != ""
 	// Serving over TLS implies the session cookie can carry the Secure flag; enable it
-	// automatically so operators don't have to remember the separate env var (they can
-	// still force it on a plaintext LAN with BLADEDR_SECURE_COOKIES).
-	secureCookies := tlsOn || os.Getenv("BLADEDR_SECURE_COOKIES") == "1" || os.Getenv("BLADEDR_SECURE_COOKIES") == "true"
+	// automatically so operators don't have to remember the separate env var. They can
+	// still force it on when TLS terminates at a reverse proxy and we serve plaintext
+	// behind it (BLADEDR_SECURE_COOKIES).
+	secureCookies := tlsOn || envBool("BLADEDR_SECURE_COOKIES")
 
-	a := &api.API{Store: st, Runner: runner, Crypto: crypto, ActiveRules: loadActiveRules, RiskDataset: riskDataset,
-		RiskAugment:   os.Getenv("BLADEDR_RISK_AUGMENT") == "1" || os.Getenv("BLADEDR_RISK_AUGMENT") == "true",
-		IngestToken:   ingestTokens,
-		SecureCookies: secureCookies,
-		Policies:      loadPolicyMeta()}
-	srv := &http.Server{Addr: addr, Handler: a.Routes(), ReadHeaderTimeout: 10 * time.Second}
+	a := &api.API{Store: st, Runner: runner, Queue: queue, Responses: responses, Crypto: crypto, ActiveRules: loadActiveRules, RiskDataset: riskDataset, RetentionPolicy: retention,
+		RiskAugment:    envBool("BLADEDR_RISK_AUGMENT"),
+		SecureCookies:  secureCookies,
+		TrustedProxies: trustedProxies(),
+		Policies:       loadPolicyMeta()}
+	srv := newHTTPServer(addr, a.Routes())
 	if tlsOn {
 		srv.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12}
 	}
@@ -172,6 +174,18 @@ func main() {
 	}
 	if err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
+	}
+}
+
+func newHTTPServer(addr string, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      5 * time.Minute,
+		IdleTimeout:       2 * time.Minute,
+		MaxHeaderBytes:    1 << 20,
 	}
 }
 
@@ -291,16 +305,26 @@ func bootstrapAdmin(ctx context.Context, st store.Store) {
 }
 
 func openStore(ctx context.Context) store.Store {
+	// Two-person control on response actions is on unless explicitly disabled. The
+	// opt-out is logged so the weaker posture shows up in startup output and not only
+	// in the environment.
+	policy := store.SelfApprovalPolicy{AllowSelfApproval: envBool("BLADEDR_RESPONSE_ALLOW_SELF_APPROVAL")}
+	if policy.AllowSelfApproval {
+		log.Printf("WARNING: response-action self-approval is enabled; a single admin can request and approve containment")
+	}
 	if dsn := os.Getenv("BLADEDR_DATABASE_URL"); dsn != "" {
 		pg, err := store.OpenPostgres(ctx, dsn)
 		if err != nil {
 			log.Fatalf("connect postgres: %v", err)
 		}
+		pg.SelfApprovalPolicy = policy
 		log.Printf("using PostgreSQL store")
 		return pg
 	}
 	log.Printf("using in-memory store (set BLADEDR_DATABASE_URL for Postgres)")
-	return store.NewMemory()
+	mem := store.NewMemory()
+	mem.SelfApprovalPolicy = policy
+	return mem
 }
 
 func openCrypto() *secrets.Crypto {
@@ -401,8 +425,16 @@ func loadPolicyTar() []byte {
 		_, _ = tw.Write(data)
 		n++
 	}
-	tw.Close()
-	gz.Close()
+	if err := tw.Close(); err != nil {
+		log.Fatalf("build policy bundle: %v", err)
+	}
+	if err := gz.Close(); err != nil {
+		log.Fatalf("compress policy bundle: %v", err)
+	}
+	if n == 0 {
+		log.Printf("no shield-*.yml policies found in %s; server-push sensor deployment is disabled", dir)
+		return nil
+	}
 	log.Printf("loaded %d Tetragon policies for sensor deploy (%d bytes gz)", n, buf.Len())
 	return buf.Bytes()
 }
@@ -463,8 +495,8 @@ func schedulerTick() time.Duration {
 	return 30 * time.Second
 }
 
-// scanTimeout bounds a single host scan in the scheduler so a hung host can't
-// stall the fleet; overridable via BLADEDR_SCAN_TIMEOUT (Go duration).
+// scanTimeout bounds a single queued host scan so a hung SSH target cannot hold a
+// worker indefinitely; overridable via BLADEDR_SCAN_TIMEOUT (Go duration).
 func scanTimeout() time.Duration {
 	if v := os.Getenv("BLADEDR_SCAN_TIMEOUT"); v != "" {
 		if d, err := time.ParseDuration(v); err == nil && d > 0 {
@@ -474,9 +506,111 @@ func scanTimeout() time.Duration {
 	return 5 * time.Minute
 }
 
+func scanWorkers() int {
+	if v := os.Getenv("BLADEDR_SCAN_WORKERS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 1 && n <= 128 {
+			return n
+		}
+	}
+	return 4
+}
+
+func exportWorkers() int {
+	if v := os.Getenv("BLADEDR_EXPORT_WORKERS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 1 && n <= 32 {
+			return n
+		}
+	}
+	return 2
+}
+
+func retentionPolicy() store.RetentionPolicy {
+	return store.RetentionPolicy{
+		ObservationAge: retentionDuration("BLADEDR_RETENTION_OBSERVATIONS"),
+		ScanAge:        retentionDuration("BLADEDR_RETENTION_SCANS"),
+		AuditAge:       retentionDuration("BLADEDR_RETENTION_AUDIT"),
+		ArchiveAge:     retentionDuration("BLADEDR_RETENTION_ARCHIVE"),
+	}
+}
+
+func retentionDuration(key string) time.Duration {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" || value == "0" {
+		return 0
+	}
+	d, err := time.ParseDuration(value)
+	if err != nil || d < time.Hour {
+		log.Fatalf("%s must be a Go duration of at least 1h", key)
+	}
+	return d
+}
+
+func runRetention(ctx context.Context, st store.Store, policy store.RetentionPolicy) {
+	run := func() {
+		result, err := st.ApplyRetention(ctx, policy)
+		if err != nil {
+			log.Printf("retention: %v", err)
+			return
+		}
+		if result != (store.RetentionResult{}) {
+			log.Printf("retention: archived observations=%d scans=%d audit=%d; purged archive=%d",
+				result.Observations, result.Scans, result.Audit, result.Archive)
+		}
+	}
+	run()
+	ticker := time.NewTicker(24 * time.Hour)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			run()
+		}
+	}
+}
+
+func trustedProxies() []*net.IPNet {
+	raw := strings.TrimSpace(os.Getenv("BLADEDR_TRUSTED_PROXY_CIDRS"))
+	if raw == "" {
+		return nil
+	}
+	var out []*net.IPNet
+	for _, value := range strings.Split(raw, ",") {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if !strings.Contains(value, "/") {
+			ip := net.ParseIP(value)
+			if ip == nil {
+				log.Fatalf("BLADEDR_TRUSTED_PROXY_CIDRS: invalid IP %q", value)
+			}
+			if ip.To4() != nil {
+				value += "/32"
+			} else {
+				value += "/128"
+			}
+		}
+		_, network, err := net.ParseCIDR(value)
+		if err != nil {
+			log.Fatalf("BLADEDR_TRUSTED_PROXY_CIDRS: invalid CIDR %q: %v", value, err)
+		}
+		out = append(out, network)
+	}
+	return out
+}
+
 func env(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
 	}
 	return def
+}
+
+// envBool reads an opt-in flag. Only "1" and "true" enable it; anything else,
+// including a typo, leaves the safer default in place.
+func envBool(key string) bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
+	return v == "1" || v == "true"
 }

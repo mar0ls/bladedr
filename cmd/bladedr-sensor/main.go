@@ -38,7 +38,7 @@ func main() {
 		tetragon    = flag.String("tetragon", "tetragon", "tetragon binary path")
 		exportFile  = flag.String("export-file", "", "follow an existing Tetragon JSON export instead of launching tetragon")
 		interval    = flag.Duration("interval", 5*time.Second, "how often to flush a batch of observations")
-		token       = flag.String("token", "", "ingest bearer token (BLADEDR_INGEST_TOKEN on the server)")
+		token       = flag.String("token", "", "per-host ingest bearer token (or BLADEDR_INGEST_TOKEN in this process)")
 		dryRun      = flag.Bool("dry-run", false, "print observations instead of posting")
 		showVersion = flag.Bool("version", false, "print version and exit")
 	)

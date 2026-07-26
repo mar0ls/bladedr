@@ -21,7 +21,7 @@ func TestFeaturesStructuralClasses(t *testing.T) {
 			t.Errorf("missing feature %q in %v", want, feats)
 		}
 	}
-	// path:home vs path:tmp must differ — the whole point (separable within a rule).
+	// Path classes must distinguish home directories from temporary directories.
 	home := &store.Observation{RuleID: "systemd-suspicious-execstart", Evidence: map[string]any{"exec_start": "/home/ci/run.sh"}}
 	hf := map[string]bool{}
 	for _, f := range Features(home) {
