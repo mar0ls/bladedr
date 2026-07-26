@@ -294,11 +294,17 @@ func bootstrapAdmin(ctx context.Context, st store.Store) {
 	if err != nil {
 		log.Fatalf("hash admin password: %v", err)
 	}
-	if err := st.CreateUser(ctx, &store.User{Username: user, PasswordHash: hash, Role: store.RoleAdmin}); err != nil {
+	// A generated password gets printed to the startup log, so it outlives this process
+	// in scrollback and journald. Good enough to get in once, not good enough to keep,
+	// hence the forced change. A password the operator supplied is theirs already, and
+	// forcing a change would break every scripted or containerised deployment.
+	if err := st.CreateUser(ctx, &store.User{
+		Username: user, PasswordHash: hash, Role: store.RoleAdmin, MustChangePassword: generated,
+	}); err != nil {
 		log.Fatalf("create admin user: %v", err)
 	}
 	if generated {
-		log.Printf("created initial admin %q with GENERATED password: %s  (set BLADEDR_ADMIN_PASSWORD to choose one)", user, pw)
+		log.Printf("created initial admin %q with GENERATED password: %s  (must be changed at first sign-in; set BLADEDR_ADMIN_PASSWORD to choose one instead)", user, pw)
 	} else {
 		log.Printf("created initial admin user %q", user)
 	}

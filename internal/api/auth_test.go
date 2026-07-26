@@ -196,8 +196,31 @@ func TestMeReturnsUser(t *testing.T) {
 	if u.Username != "operator-user" {
 		t.Errorf("username = %q, want operator-user", u.Username)
 	}
-	if strings.Contains(w.Body.String(), "password") {
-		t.Error("/me response leaks a password field")
+
+	// Allowlist rather than a substring search for "password": this catches any field
+	// added later that shouldn't be here, including one whose name gives no hint — a
+	// sealed MFA secret, say. Adding a field to the User struct should require deciding
+	// it is safe to publish, not just naming it carefully.
+	allowed := map[string]bool{
+		"id": true, "username": true, "role": true, "disabled": true,
+		"mfa_enabled": true, "must_change_password": true, "created_at": true,
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("decode raw: %v", err)
+	}
+	for field := range raw {
+		if !allowed[field] {
+			t.Errorf("/me exposes unexpected field %q", field)
+		}
+	}
+	// Belt and braces: the stored hash must never appear, whatever it is keyed under.
+	stored, err := a.Store.GetUserByName(context.Background(), "operator-user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(w.Body.String(), stored.PasswordHash) {
+		t.Error("/me response contains the password hash")
 	}
 }
 

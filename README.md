@@ -338,6 +338,19 @@ Console and API require auth. A fresh install creates an admin account (password
 `BLADEDR_ADMIN_PASSWORD`, or generated and printed once). Sign in at `/ui/login`; the
 session works as a cookie (UI) or `Authorization: Bearer <token>` (API).
 
+A password you didn't choose has to be replaced before the account can do anything else.
+That covers a generated bootstrap password — it goes to the startup log, so it also lives
+in scrollback and journald — plus any account an admin created or reset, where two people
+know the password. Until it's changed, every route answers `403` except the change
+itself, and the console redirects to `/ui/password`. A password you set through
+`BLADEDR_ADMIN_PASSWORD` is already yours, so it isn't forced.
+
+```sh
+curl -H "$AUTH" -X POST :8080/api/v1/me/password \
+  -H 'content-type: application/json' \
+  -d '{"current_password":"…","new_password":"…"}'    # 204, flag cleared
+```
+
 Roles: admin (everything + users/credentials/response decisions), operator (read +
 triage/scan/rules/sensor), viewer (read-only). Only admins create users and assign
 roles. eBPF sensors authenticate machine-to-machine with a per-host token minted at

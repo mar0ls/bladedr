@@ -54,14 +54,18 @@ const (
 
 // User is a console account. The password is stored only as a bcrypt hash.
 type User struct {
-	ID           string    `json:"id"`
-	Username     string    `json:"username"`
-	PasswordHash string    `json:"-"`
-	Role         string    `json:"role"`
-	Disabled     bool      `json:"disabled"`
-	MFASecretEnc []byte    `json:"-"`
-	MFAEnabled   bool      `json:"mfa_enabled"`
-	CreatedAt    time.Time `json:"created_at"`
+	ID           string `json:"id"`
+	Username     string `json:"username"`
+	PasswordHash string `json:"-"`
+	Role         string `json:"role"`
+	Disabled     bool   `json:"disabled"`
+	MFASecretEnc []byte `json:"-"`
+	MFAEnabled   bool   `json:"mfa_enabled"`
+	// MustChangePassword blocks every route except changing the password. Set when the
+	// password was generated rather than chosen, or reset by another admin — in both
+	// cases someone other than the account holder has seen it.
+	MustChangePassword bool      `json:"must_change_password"`
+	CreatedAt          time.Time `json:"created_at"`
 }
 
 // AuditEvent is one security-relevant action recorded for the audit log (logins,

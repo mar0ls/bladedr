@@ -39,6 +39,12 @@ versions follow [SemVer](https://semver.org).
   networks. Without it `X-Forwarded-For` is ignored, so a spoofed header can't dodge the
   login lockout or misattribute an audit entry.
 - Keyset pagination on observations, so paging a large fleet can't skip or repeat rows.
+- Forced password change (`POST /api/v1/me/password`, `/ui/password`). A password the
+  account holder didn't choose — a generated bootstrap password, which the startup log
+  keeps, or one an admin set or reset — has to be replaced before anything else works.
+  Every other route returns `403` until then and the console redirects to the form.
+  Self-service password change is available to every role, which also means a viewer can
+  finally enrol MFA on their own account.
 
 ### Changed
 - Sensors authenticate per host instead of with a shared `BLADEDR_INGEST_TOKEN`. The
@@ -64,6 +70,10 @@ versions follow [SemVer](https://semver.org).
 - Sensor tokens are per host now. A sensor still configured with the old shared
   `BLADEDR_INGEST_TOKEN` will be rejected — mint one per host
   (`POST /api/v1/hosts/{id}/sensor-tokens`) or redeploy, which does it for you.
+- Existing accounts are **not** forced to change their passwords on upgrade. Migration
+  `0009` defaults the flag to false: those operators chose their passwords, and locking a
+  running deployment out of its own console would be a worse failure than the one this
+  prevents. It applies to accounts created or reset from 0.9.0 onward.
 - Nothing else is dropped or rewritten. Hosts, scans, observations, triage state, rules,
   baselines, credentials and audit history all carry across; there is a test that seeds a
   0.1.0-era schema, upgrades it and asserts exactly that.

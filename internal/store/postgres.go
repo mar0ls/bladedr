@@ -1118,14 +1118,14 @@ func (p *Postgres) CreateUser(ctx context.Context, u *User) error {
 	if u.CreatedAt.IsZero() {
 		u.CreatedAt = time.Now().UTC()
 	}
-	_, err := p.pool.Exec(ctx, `INSERT INTO users (id, username, password_hash, role, disabled, mfa_secret_enc, mfa_enabled, created_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`, u.ID, u.Username, u.PasswordHash, u.Role, u.Disabled, nullBytes(u.MFASecretEnc), u.MFAEnabled, u.CreatedAt)
+	_, err := p.pool.Exec(ctx, `INSERT INTO users (id, username, password_hash, role, disabled, mfa_secret_enc, mfa_enabled, must_change_password, created_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`, u.ID, u.Username, u.PasswordHash, u.Role, u.Disabled, nullBytes(u.MFASecretEnc), u.MFAEnabled, u.MustChangePassword, u.CreatedAt)
 	return err
 }
 
 func scanUser(row pgx.Row) (*User, error) {
 	var u User
-	err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.Disabled, &u.MFASecretEnc, &u.MFAEnabled, &u.CreatedAt)
+	err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.Disabled, &u.MFASecretEnc, &u.MFAEnabled, &u.MustChangePassword, &u.CreatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -1133,19 +1133,19 @@ func scanUser(row pgx.Row) (*User, error) {
 }
 
 func (p *Postgres) GetUser(ctx context.Context, id string) (*User, error) {
-	row := p.pool.QueryRow(ctx, `SELECT id, username, password_hash, role, disabled, mfa_secret_enc, mfa_enabled, created_at FROM users WHERE id=$1`, id)
+	row := p.pool.QueryRow(ctx, `SELECT id, username, password_hash, role, disabled, mfa_secret_enc, mfa_enabled, must_change_password, created_at FROM users WHERE id=$1`, id)
 	u, err := scanUser(row)
 	return u, notFound(err, "user", id)
 }
 
 func (p *Postgres) GetUserByName(ctx context.Context, username string) (*User, error) {
-	row := p.pool.QueryRow(ctx, `SELECT id, username, password_hash, role, disabled, mfa_secret_enc, mfa_enabled, created_at FROM users WHERE username=$1`, username)
+	row := p.pool.QueryRow(ctx, `SELECT id, username, password_hash, role, disabled, mfa_secret_enc, mfa_enabled, must_change_password, created_at FROM users WHERE username=$1`, username)
 	u, err := scanUser(row)
 	return u, notFound(err, "user", username)
 }
 
 func (p *Postgres) ListUsers(ctx context.Context) ([]*User, error) {
-	rows, err := p.pool.Query(ctx, `SELECT id, username, password_hash, role, disabled, mfa_secret_enc, mfa_enabled, created_at FROM users ORDER BY username`)
+	rows, err := p.pool.Query(ctx, `SELECT id, username, password_hash, role, disabled, mfa_secret_enc, mfa_enabled, must_change_password, created_at FROM users ORDER BY username`)
 	if err != nil {
 		return nil, err
 	}
@@ -1163,8 +1163,8 @@ func (p *Postgres) ListUsers(ctx context.Context) ([]*User, error) {
 
 func (p *Postgres) UpdateUser(ctx context.Context, u *User) error {
 	_, err := p.pool.Exec(ctx, `UPDATE users SET username=$2, password_hash=$3, role=$4, disabled=$5,
-		mfa_secret_enc=$6, mfa_enabled=$7 WHERE id=$1`,
-		u.ID, u.Username, u.PasswordHash, u.Role, u.Disabled, nullBytes(u.MFASecretEnc), u.MFAEnabled)
+		mfa_secret_enc=$6, mfa_enabled=$7, must_change_password=$8 WHERE id=$1`,
+		u.ID, u.Username, u.PasswordHash, u.Role, u.Disabled, nullBytes(u.MFASecretEnc), u.MFAEnabled, u.MustChangePassword)
 	return err
 }
 
@@ -1186,7 +1186,8 @@ func (p *Postgres) CreateSession(ctx context.Context, s *Session) error {
 }
 
 func (p *Postgres) SessionUser(ctx context.Context, tokenHash string) (*User, error) {
-	row := p.pool.QueryRow(ctx, `SELECT u.id, u.username, u.password_hash, u.role, u.disabled, u.mfa_secret_enc, u.mfa_enabled, u.created_at
+	row := p.pool.QueryRow(ctx, `SELECT u.id, u.username, u.password_hash, u.role, u.disabled,
+			u.mfa_secret_enc, u.mfa_enabled, u.must_change_password, u.created_at
 		FROM sessions s JOIN users u ON u.id = s.user_id
 		WHERE s.token_hash=$1 AND s.expires_at > now()`, tokenHash)
 	u, err := scanUser(row)

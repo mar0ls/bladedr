@@ -45,6 +45,7 @@ var (
 	tmplAudit        = uiTemplate("audit.html")
 	tmplPolicies     = uiTemplate("policies.html")
 	tmplLogin        = template.Must(template.New("login.html").ParseFS(uiFS, "templates/login.html"))
+	tmplPassword     = template.Must(template.New("password.html").ParseFS(uiFS, "templates/password.html"))
 )
 
 type bar struct {
@@ -164,6 +165,8 @@ func (a *API) registerUI(mux *http.ServeMux) {
 	mux.HandleFunc("GET /ui/rules", a.uiRules)
 	mux.HandleFunc("GET /ui/policies", a.uiPolicies)
 	mux.HandleFunc("GET /ui/login", a.uiLogin)
+	mux.HandleFunc("GET /ui/password", a.uiPassword)
+	mux.HandleFunc("POST /ui/password", a.uiChangePassword)
 	mux.HandleFunc("GET /ui/logo.png", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "image/png")
 		w.Header().Set("Cache-Control", "public, max-age=86400")
@@ -203,6 +206,25 @@ func (a *API) uiPolicies(w http.ResponseWriter, r *http.Request) {
 func (a *API) uiLogin(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_ = tmplLogin.Execute(w, nil)
+}
+
+// uiPassword renders the change-password form. It is standalone rather than part of the
+// normal chrome because an account under a forced change can't reach any other page, so
+// the usual nav would be a wall of links that all bounce back here.
+func (a *API) uiPassword(w http.ResponseWriter, r *http.Request) {
+	forced := false
+	if u := currentUser(r); u != nil {
+		forced = u.MustChangePassword
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_ = tmplPassword.Execute(w, map[string]any{"Forced": forced})
+}
+
+// uiChangePassword exists so POST /ui/password is a registered route: the form itself
+// submits to the JSON API. Without it the browser would get a 405 from the mux, which
+// authMiddleware would never reach to redirect.
+func (a *API) uiChangePassword(w http.ResponseWriter, r *http.Request) {
+	http.Redirect(w, r, "/ui/password", http.StatusSeeOther)
 }
 
 // uiUsers renders the user-management page (admin-only, enforced by middleware).

@@ -140,9 +140,26 @@ func adminOnly(path string) bool {
 		strings.HasPrefix(path, "/ui/audit")
 }
 
+// selfService paths act only on the caller's own account and expose nothing about the
+// deployment, so every authenticated role may use them whatever the method. Without this
+// a viewer is read-only right down to their own credentials: they could not enrol MFA,
+// and — since a forced password change blocks everything else — an account created with
+// a generated password would have no way out of it at all.
+func selfService(path string) bool {
+	switch path {
+	case "/api/v1/me/password", "/ui/password",
+		"/api/v1/me/mfa/setup", "/api/v1/me/mfa/confirm", "/api/v1/me/mfa":
+		return true
+	}
+	return false
+}
+
 // Allowed reports whether a role may perform method on path. Public routes are
 // handled by the caller before this is consulted.
 func Allowed(role, method, path string) bool {
+	if selfService(path) {
+		return role == store.RoleAdmin || role == store.RoleOperator || role == store.RoleViewer
+	}
 	switch role {
 	case store.RoleAdmin:
 		return true
