@@ -76,8 +76,8 @@ Three binaries in a mono-repo:
   server uploads it over SSH with the current **rule bundle**, the probe collects
   state, evaluates rules on the host and returns findings (+ optional compact
   snapshot), then deletes itself.
-- **bladedr-sensor** — Phase 2 (IMPLEMENTED). A thin Tetragon wrapper: loads the
-  linux-probe-shield TracingPolicies 1:1, consumes Tetragon's JSON event stream, maps
+- **bladedr-sensor** — Phase 2 (IMPLEMENTED). A thin Tetragon wrapper: loads
+  operator-supplied TracingPolicies 1:1, consumes Tetragon's JSON event stream, maps
   each policy hit to an observation (severity/MITRE from the policy annotations) and
   posts batches to `POST /api/v1/hosts/{id}/events` (the existing REST API — pragmatic
   vs. the originally-sketched gRPC/mTLS). Optional, only for `scan_plus_sensor` hosts.
@@ -335,8 +335,10 @@ dedup: ["item.pid", "item.exe"]
 ```
 
 Tetragon rule mapping (Phase 2): we do NOT translate them to CEL — we load them
-natively into the sensor. The `linux-probe-shield` policies stay as-is; `bladedr` only
-manages them, tags the resulting `observations`, and exports them.
+natively into the sensor. TracingPolicies stay as their author wrote them; `bladedr` only
+manages them, tags the resulting `observations`, and exports them. That is also why the
+tier ships without policies: the format is Tetragon's, so any bundle works, and bladedr
+has no reason to be the one that defines detection here.
 
 ---
 
@@ -478,7 +480,7 @@ bladedr/
 │   ├── rules/          # YAML loading, CEL engine, builtin/*.yaml
 │   └── scan/           # scan orchestration, transports, scoring, dedup
 ├── internal/store/migrations/  # PostgreSQL schema (pg_search / BM25), embedded & auto-applied
-├── policies/           # imported TracingPolicy (linux-probe-shield) — Phase 2 (planned)
+├── policies/           # operator-supplied TracingPolicy dir (BLADEDR_POLICY_DIR); not in git
 ├── Dockerfile          # server image (bundles linux probes)
 ├── COVERAGE.md  README.md  DESIGN.md
 └── go.mod
@@ -492,8 +494,9 @@ bladedr/
   builtin rule set, credentials (sealed-box) + password/key SSH auth, host-key TOFU,
   rule management API, observations, REST API, Postgres store. Remaining Phase 1:
   scheduler, collections/tags in the API, ECS→Kibana exporter, hunting web UI.
-- **Phase 2 — eBPF tier**: `bladedr-sensor` (Tetragon wrapper) loading
-  `linux-probe-shield` 1:1, `/ingest/events`, the same observations/tags/export.
+- **Phase 2 — eBPF tier**: `bladedr-sensor` (Tetragon wrapper) loading TracingPolicies
+  1:1, `/ingest/events`, the same observations/tags/export. A bundle of its own is still
+  to come.
 - **Phase 3 — optional**: transient eBPF over SSH; snapshot↔event correlation.
 
 ---

@@ -1,8 +1,11 @@
-// Package sensor is bladedr's eBPF tier: a thin wrapper around Tetragon. It loads
-// the linux-probe-shield TracingPolicies, consumes Tetragon's JSON event stream,
-// and maps each policy hit to a bladedr observation (source=ebpf_sensor) posted to
-// the server — so runtime techniques (exec, injection, container escape, fileless,
-// C2) land in the same observations table as the agentless findings.
+// Package sensor is bladedr's eBPF tier: a thin wrapper around Tetragon. It loads the
+// operator's TracingPolicies, consumes Tetragon's JSON event stream, and maps each
+// policy hit to a bladedr observation (source=ebpf_sensor) posted to the server — so
+// runtime techniques (exec, injection, container escape, fileless, C2) land in the same
+// observations table as the agentless findings.
+//
+// bladedr ships no policies of its own yet, so what this tier detects is whatever the
+// policies you point it at detect.
 //
 // The detection logic lives entirely in the Tetragon policies (loaded 1:1); this
 // package only carries metadata and forwards events, so the eBPF tier drops onto
@@ -17,9 +20,13 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// PolicyMeta is the severity/MITRE/title context attached to a Tetragon policy.
-// It is read from the TracingPolicy's metadata.annotations (the linux-probe-shield
-// policies carry description/mitre/severity there).
+// PolicyMeta is the severity/MITRE/title context attached to a Tetragon policy, read
+// from metadata.annotations: description, severity and mitre. Only metadata.name is
+// required — it is what Tetragon reports back on an event, so a policy without one
+// cannot be matched to anything and is skipped. The annotations are optional: a policy
+// that has none still loads and still produces observations, falling back to severity
+// "medium", a category derived from the name, and the name as the title. Nothing here
+// is bladedr-specific enough to stop an existing Tetragon bundle from working.
 type PolicyMeta struct {
 	Name     string   // TracingPolicy metadata.name == event policy_name
 	Title    string   // from annotations.description (or the name)

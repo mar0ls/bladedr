@@ -3,13 +3,13 @@
 #
 #   scripts/deploy-sensor.sh <ssh-user@host> <bladedr-host-id>
 #
-# It copies the linux-probe-shield TracingPolicies + the cross-built sensor to the
+# It copies your TracingPolicy bundle + the cross-built sensor to the
 # host, runs Tetragon as a privileged container loading those policies, and starts
 # bladedr-sensor following Tetragon's export and posting events to the control plane.
 # Requires on the target: Docker, a BTF-capable kernel (/sys/kernel/btf/vmlinux),
 # and sudo for the SSH user. Env:
 #   BLADEDR_SERVER       control-plane URL reachable from the host (default http://<this-ip>:8080)
-#   BLADEDR_POLICY_DIR   TracingPolicy bundle (default ./linux-probe-shield)
+#   BLADEDR_POLICY_DIR   your TracingPolicy bundle (default ./policies)
 #   BLADEDR_TETRAGON     tetragon image (default quay.io/cilium/tetragon:v1.7.0)
 #   BLADEDR_SENSOR_TOKEN per-host token returned by POST /hosts/{id}/sensor-tokens
 #   BLADEDR_TOKEN        admin session token used to mint one when the above is unset
@@ -18,7 +18,7 @@ cd "$(dirname "$0")/.."
 
 TARGET="${1:?usage: deploy-sensor.sh <ssh-user@host> <bladedr-host-id>}"
 HOST_ID="${2:?bladedr host id required}"
-POLICY_DIR="${BLADEDR_POLICY_DIR:-linux-probe-shield}"
+POLICY_DIR="${BLADEDR_POLICY_DIR:-policies}"
 TETRAGON="${BLADEDR_TETRAGON:-quay.io/cilium/tetragon:v1.7.0}"
 SERVER="${BLADEDR_SERVER:-http://$(ipconfig getifaddr en0 2>/dev/null || hostname -I 2>/dev/null | awk '{print $1}'):8080}"
 TOKEN="${BLADEDR_SENSOR_TOKEN:-}"
@@ -55,7 +55,7 @@ GOOS=linux GOARCH=amd64 go build -o /tmp/bladedr-sensor.linux ./cmd/bladedr-sens
 
 echo "==> copying policies + sensor to $TARGET"
 ssh "$TARGET" 'rm -rf /tmp/bladedr-shield /tmp/bladedr-tetra && mkdir -p /tmp/bladedr-shield /tmp/bladedr-tetra'
-scp -q "$POLICY_DIR"/shield-*.y*ml "$TARGET":/tmp/bladedr-shield/
+scp -q "$POLICY_DIR"/*.y*ml "$TARGET":/tmp/bladedr-shield/
 scp -q /tmp/bladedr-sensor.linux "$TARGET":/tmp/bladedr-sensor
 printf 'BLADEDR_INGEST_TOKEN=%s\n' "$TOKEN" | ssh "$TARGET" 'umask 077; cat > /tmp/bladedr-sensor.env'
 

@@ -420,7 +420,11 @@ func loadPolicyTar() []byte {
 	n := 0
 	for _, e := range entries {
 		name := e.Name()
-		if e.IsDir() || !strings.HasPrefix(name, "shield-") || (!strings.HasSuffix(name, ".yml") && !strings.HasSuffix(name, ".yaml")) {
+		// Any .yml/.yaml in the directory, matching what the sensor itself loads. This
+		// used to also require a "shield-" prefix, which was the naming of one specific
+		// bundle: an operator's own policy would be silently left out of the push while
+		// the sensor happily loaded it when deployed by hand.
+		if e.IsDir() || (!strings.HasSuffix(name, ".yml") && !strings.HasSuffix(name, ".yaml")) {
 			continue
 		}
 		data, err := os.ReadFile(filepath.Join(dir, name))
