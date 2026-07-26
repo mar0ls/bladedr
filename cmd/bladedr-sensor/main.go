@@ -1,9 +1,9 @@
 // Command bladedr-sensor is the eBPF tier: a thin wrapper around Tetragon. It loads
-// the linux-probe-shield TracingPolicies into Tetragon, consumes Tetragon's JSON
+// operator-supplied TracingPolicies into Tetragon, consumes Tetragon's JSON
 // event stream, maps each policy hit to a bladedr observation (source=ebpf_sensor)
 // and posts batches to the server — the runtime counterpart of the agentless probe.
 //
-//	bladedr-sensor --server http://control:8080 --host-id <id> --policy-dir ./linux-probe-shield
+//	bladedr-sensor --server http://control:8080 --host-id <id> --policy-dir ./policies
 //
 // By default it launches and supervises Tetragon (needs root + a BTF-capable
 // kernel). With --export-file it instead follows an existing Tetragon JSON export
@@ -34,7 +34,7 @@ func main() {
 	var (
 		server      = flag.String("server", "http://localhost:8080", "bladedr control-plane base URL")
 		hostID      = flag.String("host-id", "", "this host's bladedr id (required unless --dry-run)")
-		policyDir   = flag.String("policy-dir", "linux-probe-shield", "Tetragon TracingPolicy bundle dir")
+		policyDir   = flag.String("policy-dir", "policies", "dir of Tetragon TracingPolicy YAML; you supply these")
 		tetragon    = flag.String("tetragon", "tetragon", "tetragon binary path")
 		exportFile  = flag.String("export-file", "", "follow an existing Tetragon JSON export instead of launching tetragon")
 		interval    = flag.Duration("interval", 5*time.Second, "how often to flush a batch of observations")

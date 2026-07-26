@@ -1,0 +1,72 @@
+# A complete bladedr stack from the published image: control plane + database.
+#
+# Copy this next to a .env file and bring it up:
+#
+#   ./bladedr-server -keygen                      # or: docker run --rm mar0ls/bladedr -keygen
+#   cat > .env <<EOF
+#   BLADEDR_NODE_KEY=<the key it printed>
+#   POSTGRES_PASSWORD=<something long and random>
+#   EOF
+#   docker compose -f compose.example.yml up -d
+#
+# The repository's own docker-compose.yml is the database alone, for developing against
+# a locally built binary. This file is the deployment one.
+services:
+  db:
+    # ParadeDB is PostgreSQL + pg_search. The BM25 index behind free-text search over
+    # observations comes from pg_search, so a stock postgres image will not do.
+    image: paradedb/paradedb:0.23.5
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: bladedr
+      # No default on purpose: compose refuses to start rather than quietly bringing up
+      # a database that holds sealed SSH credentials behind a password from an example.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: bladedr
+    volumes:
+      - bladedr_pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bladedr"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    # Not published. The control plane reaches it over the compose network; exposing
+    # 5432 to the host only widens what an attacker can reach.
+
+  server:
+    # Pin the version. `latest` moves under you on the next release, and this is the
+    # component holding SSH access to your fleet.
+    image: mar0ls/bladedr:0.9.0
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      BLADEDR_DATABASE_URL: postgres://bladedr:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@db:5432/bladedr
+      # Decrypts sealed SSH credentials. Generate it once and back it up separately from
+      # the database — lose it and every stored credential is unrecoverable, by design.
+      # Without it the server mints an ephemeral key and forgets your credentials on
+      # restart, so this is required rather than defaulted.
+      BLADEDR_NODE_KEY: ${BLADEDR_NODE_KEY:?run -keygen and put the key in .env}
+      # Printed once at first start if unset, and must be changed at first sign-in.
+      # BLADEDR_ADMIN_PASSWORD: ""
+      BLADEDR_LOG_FORMAT: json
+    ports:
+      # Loopback only, because this serves plaintext HTTP as configured here. Put a
+      # reverse proxy in front of it, or give the server a certificate with
+      # BLADEDR_TLS_CERT/BLADEDR_TLS_KEY and publish 8080 directly. Behind a proxy also
+      # set BLADEDR_SECURE_COOKIES=1 and BLADEDR_TRUSTED_PROXY_CIDRS, or the login
+      # lockout and the audit log will attribute everything to the proxy.
+      - "127.0.0.1:8080:8080"
+    # Nothing to mount for agentless scanning: the image already carries the probe for
+    # both architectures and uploads it over SSH itself. Add a volumes: block only for
+    #
+    #   - ./policies:/etc/bladedr/policies:ro   # the optional eBPF tier
+    #   - ./tls:/etc/bladedr/tls:ro             # if TLS terminates here
+    #
+    # The image ships the sensor binaries but no Tetragon policies — bladedr does not
+    # publish a bundle yet, so those are yours to supply. See the eBPF tier section of
+    # the README.
+
+volumes:
+  bladedr_pgdata:

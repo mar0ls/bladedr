@@ -51,7 +51,7 @@ fi
 # Sensor-deploy config (idempotent): how hosts reach the control plane, the policy
 # bundle to push, and the cross-built sensor binaries. Appended if missing.
 SERVER_URL="${BLADEDR_SERVER_URL:-http://$(ipconfig getifaddr en0 2>/dev/null || hostname -I 2>/dev/null | awk '{print $1}'):8080}"
-POLICY_DIR="${BLADEDR_POLICY_DIR:-linux-probe-shield}"
+POLICY_DIR="${BLADEDR_POLICY_DIR:-policies}"
 gen() { openssl rand -hex "${1:-24}" 2>/dev/null || head -c "${1:-24}" /dev/urandom | od -An -tx1 | tr -d ' \n'; }
 ensure_var() { grep -q "^$1=" "$ENVFILE" || printf '%s=%s\n' "$1" "$2" >> "$ENVFILE"; }
 ensure_var BLADEDR_SENSOR_LINUX_AMD64 bin/bladedr-sensor.linux-amd64

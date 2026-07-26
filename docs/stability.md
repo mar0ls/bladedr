@@ -43,7 +43,7 @@ misreading:
 
 | Component | Why it isn't GA |
 |---|---|
-| `bladedr-sensor` + Tetragon integration | Depends on an external policy engine and a BTF-capable kernel; the event→observation mapping is still settling |
+| `bladedr-sensor` + Tetragon integration | Depends on an external policy engine and a BTF-capable kernel, and **you supply the TracingPolicies** — no bundle ships with bladedr yet, so the tier is off out of the box. A written and kernel-tested set is planned for a later release. The event→observation mapping is still settling |
 | Server-push sensor deployment | Touches systemd and Docker on the target; too many host variations to call settled |
 | **Response actions** | Landed in 0.9.0 and run root commands on production hosts. Unit- and API-tested, but not yet proven on a real fleet — `isolate_host` in particular can strand a host if the control-plane endpoint is wrong |
 | `bladectl` | Flag names may change while the ergonomics settle |

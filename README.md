@@ -154,9 +154,27 @@ A case that fails on exactly one backend means that backend is wrong.
 The server runs anywhere; scan targets are always Linux (over SSH).
 
 ```sh
-docker build -t bladedr-server .
-docker run -p 8080:8080 -e BLADEDR_DATABASE_URL=... -e BLADEDR_NODE_KEY=... bladedr-server
+docker run -p 127.0.0.1:8080:8080 \
+  -e BLADEDR_DATABASE_URL=postgres://… -e BLADEDR_NODE_KEY=… mar0ls/bladedr:0.9.0
 ```
+
+That is the whole agentless product: the image carries the probe for linux/amd64 and
+linux/arm64 and uploads it over SSH itself, and the ~85 builtin rules are compiled into
+the binary. Nothing needs to be cloned from here to scan a host. Two things do come from
+outside the image:
+
+- **A database.** Without `BLADEDR_DATABASE_URL` state is in memory and gone on restart.
+  ParadeDB, not stock Postgres — free-text search uses its BM25 index.
+- **eBPF policies**, if you want the sensor tier. `/etc/bladedr/policies` in the image is
+  deliberately empty; mount your own bundle at it (see [eBPF tier](#ebpf-tier)).
+
+[docs/compose.example.yml](docs/compose.example.yml) is a complete stack — control plane
+plus database — with the node key and database password required rather than defaulted,
+so it refuses to start half-configured instead of coming up with an example password
+guarding your sealed SSH credentials.
+
+Pin the version. `latest` moves on the next release, and this is the component holding
+SSH access to your fleet.
 
 Running it for real (TLS, systemd, Postgres, backups, hardening): see
 [docs/deployment.md](docs/deployment.md).
@@ -313,16 +331,38 @@ bladectl responses reject --reason "wrong host" "$ACTION"
 
 Agentless scans see the artifact at rest; the sensor sees the act in real time (exec,
 injection, container escape, fileless, C2). `bladedr-sensor` wraps
-[Tetragon](https://github.com/cilium/tetragon): it loads the `linux-probe-shield`
-TracingPolicies, consumes Tetragon's JSON stream, maps each hit to an observation
-(severity/MITRE from the policy annotations) and posts batches. These land in the same
-`observations` table (`source=ebpf_sensor`), so they flow through triage, the risk
-model, the UI and export unchanged. A host is `scan_only` or `scan_plus_sensor`.
+[Tetragon](https://github.com/cilium/tetragon): it loads TracingPolicies, consumes
+Tetragon's JSON stream, maps each hit to an observation (severity/MITRE from the policy
+annotations) and posts batches. These land in the same `observations` table
+(`source=ebpf_sensor`), so they flow through triage, the risk model, the UI and export
+unchanged. A host is `scan_only` or `scan_plus_sensor`.
+
+**You supply the policies.** bladedr does not ship a bundle yet — one written and tested
+against real kernels is planned for a later release. Until then, point
+`BLADEDR_POLICY_DIR` at a directory of your own Tetragon TracingPolicy YAML:
+
+```yaml
+# policies/exec-from-tmp.yaml — any *.yml or *.yaml in the directory is picked up
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: exec-from-tmp
+spec:
+  kprobes:
+    - call: "security_bprm_check"
+      # …
+```
+
+The sensor reads the policy's own metadata for severity and MITRE mapping, so what a hit
+looks like in bladedr is decided in the policy, not in bladedr. Without a policy
+directory the sensor has nothing to load and the tier is simply off; agentless scanning
+is unaffected.
 
 ```sh
 make sensor
 BLADEDR_TOKEN="$TOKEN" \
 BLADEDR_SERVER=https://bladedr.example \
+BLADEDR_POLICY_DIR=./policies \
   scripts/deploy-sensor.sh user@host "$HOST_ID"
 curl -H "$AUTH" ':8080/api/v1/observations?source=ebpf_sensor'
 ```
@@ -331,6 +371,11 @@ Needs Docker and a BTF-capable kernel (Tetragon runs as a privileged container).
 detection logic lives in the policies; the sensor only forwards events. The
 server-push path installs to `/opt/bladedr` and runs the sensor as a systemd unit
 (`Restart=always`, token in a mode-0600 `EnvironmentFile`, never in argv).
+
+Tetragon validates the whole bundle at load and aborts on any single failure, so a
+policy referencing a kprobe symbol your kernel doesn't export takes the rest down with
+it. `deploy-sensor.sh` works around this by checking each non-syscall symbol against
+`/proc/kallsyms` on the target and setting aside the ones that won't load.
 
 ## Auth and roles
 
