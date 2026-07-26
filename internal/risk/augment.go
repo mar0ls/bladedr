@@ -2,7 +2,7 @@ package risk
 
 import (
 	// math/rand (not crypto/rand) is intentional: synthetic data augmentation must be
-	// DETERMINISTIC given a seed (reproducible training); this is ML resampling, not
+	// deterministic given a seed (reproducible training); this is ML resampling, not
 	// security/token material.
 	// nosemgrep: go.lang.security.audit.crypto.math_random.math-random-used
 	"math/rand"
@@ -14,13 +14,12 @@ import (
 // feature-jittered synthetic copies, up to the majority count. Deterministic given
 // seed.
 //
-// Honest about its limits: for the generative Naive Bayes this mainly corrects
-// class imbalance (the priors) and smooths sparse feature cells — the larger
-// modelling win is the richer name-free features in Features(). It must feed
-// TRAINING/scoring ONLY, never the Evaluate cross-validation: oversampling before
-// CV leaks (synthetic near-duplicates of a held-out row land in train and inflate
-// accuracy), so Evaluate stays on real data and Augment is applied separately when
-// fitting the scorer.
+// Honest about its limits: for the generative Naive Bayes this mainly corrects class
+// imbalance (the priors) and smooths sparse feature cells — the larger modelling win
+// is the richer name-free features in Features(). It must feed training/scoring only,
+// never the Evaluate cross-validation: oversampling before CV leaks (synthetic
+// near-duplicates of a held-out row land in train and inflate accuracy), so Evaluate
+// stays on real data and Augment is applied separately when fitting the scorer.
 //
 // The "jitter" is feature dropout: a synthetic copy may drop one evidence-derived
 // class (path/uid/parent), so the model doesn't over-rely on a single co-occurring

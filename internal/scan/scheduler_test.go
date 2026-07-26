@@ -9,20 +9,20 @@ import (
 	"bladedr/internal/store"
 )
 
-// stubRunner records which hosts were scanned, instead of running a real probe.
-type stubRunner struct {
+// stubEnqueuer records which hosts were queued, instead of running a real probe.
+type stubEnqueuer struct {
 	mu      sync.Mutex
 	scanned []string
 }
 
-func (s *stubRunner) Scan(_ context.Context, h *store.Host, trigger string) (*store.Scan, error) {
+func (s *stubEnqueuer) Enqueue(_ context.Context, h *store.Host, trigger string) (*store.ScanJob, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.scanned = append(s.scanned, h.ID+":"+trigger)
-	return &store.Scan{HostID: h.ID, Trigger: trigger}, nil
+	return &store.ScanJob{HostID: h.ID, Trigger: trigger}, nil
 }
 
-func (s *stubRunner) count() int {
+func (s *stubEnqueuer) count() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return len(s.scanned)
@@ -37,8 +37,8 @@ func TestSchedulerRunDue(t *testing.T) {
 	_ = st.CreateHost(ctx, h2)
 
 	now := time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)
-	run := &stubRunner{}
-	sched := &Scheduler{Store: st, Runner: run, Now: func() time.Time { return now }, Logf: func(string, ...any) {}}
+	run := &stubEnqueuer{}
+	sched := &Scheduler{Store: st, Queue: run, Now: func() time.Time { return now }, Logf: func(string, ...any) {}}
 
 	// Due single-host schedule.
 	due := &store.Schedule{HostID: h1.ID, IntervalS: 3600, Enabled: true, NextRun: now.Add(-time.Minute)}
@@ -82,8 +82,8 @@ func TestSchedulerAllHosts(t *testing.T) {
 		_ = st.CreateHost(ctx, &store.Host{Hostname: n})
 	}
 	now := time.Now().UTC()
-	run := &stubRunner{}
-	sched := &Scheduler{Store: st, Runner: run, Now: func() time.Time { return now }, Logf: func(string, ...any) {}}
+	run := &stubEnqueuer{}
+	sched := &Scheduler{Store: st, Queue: run, Now: func() time.Time { return now }, Logf: func(string, ...any) {}}
 
 	// Empty HostID = fleet-wide: every host gets scanned.
 	_ = st.CreateSchedule(ctx, &store.Schedule{IntervalS: 3600, Enabled: true, NextRun: now.Add(-time.Second)})

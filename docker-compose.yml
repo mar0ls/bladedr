@@ -3,14 +3,18 @@
 # The server auto-applies the schema on startup; for a manual apply use `make migrate`.
 services:
   db:
-    image: paradedb/paradedb:latest
+    image: paradedb/paradedb:0.23.5
     container_name: bladedr-db
     environment:
       POSTGRES_USER: bladedr
       POSTGRES_PASSWORD: bladedr
       POSTGRES_DB: bladedr
     ports:
-      - "5432:5432"
+      # Bound to the loopback interface on purpose. "5432:5432" publishes on every
+      # interface, and Docker's rules sit in front of the host firewall, so the
+      # default credentials above would be reachable from the network. This file is
+      # for development; production deployment is docs/deployment.md.
+      - "127.0.0.1:5432:5432"
     volumes:
       # PG18+ images expect the mount at /var/lib/postgresql (data goes in a subdir).
       - bladedr_pgdata:/var/lib/postgresql

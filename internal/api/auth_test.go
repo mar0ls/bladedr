@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"bladedr/internal/auth"
+	"bladedr/internal/scan"
 	"bladedr/internal/store"
 )
 
@@ -31,12 +32,12 @@ func newTestAPI(t *testing.T) (*API, map[string]string) {
 			t.Fatalf("create %s: %v", role, err)
 		}
 		tok := auth.NewToken()
-		if err := st.CreateSession(ctx, &store.Session{Token: tok, UserID: u.ID, ExpiresAt: time.Now().Add(time.Hour)}); err != nil {
+		if err := st.CreateSession(ctx, &store.Session{TokenHash: auth.TokenDigest(tok), UserID: u.ID, ExpiresAt: time.Now().Add(time.Hour)}); err != nil {
 			t.Fatalf("session %s: %v", role, err)
 		}
 		tokens[role] = tok
 	}
-	return &API{Store: st}, tokens
+	return &API{Store: st, Queue: &scan.Queue{Store: st}}, tokens
 }
 
 // do runs a request through the full router (auth middleware included).
@@ -273,16 +274,19 @@ func TestCannotDeleteOwnAccount(t *testing.T) {
 
 func TestIngestTokenAuthorizesEventsOnly(t *testing.T) {
 	a, _ := newTestAPI(t)
-	a.IngestToken = "ingest-secret"
 	// seed a host so the events route resolves
 	ctx := context.Background()
 	h := &store.Host{Hostname: "web-01"}
 	if err := a.Store.CreateHost(ctx, h); err != nil {
 		t.Fatalf("create host: %v", err)
 	}
+	raw := auth.NewToken()
+	if err := a.Store.CreateSensorToken(ctx, &store.SensorToken{HostID: h.ID, TokenHash: auth.TokenDigest(raw)}); err != nil {
+		t.Fatalf("create sensor credential: %v", err)
+	}
 
 	// A valid ingest token on a non-events route must NOT authenticate.
-	w := do(a, http.MethodGet, "/api/v1/hosts", "ingest-secret", nil)
+	w := do(a, http.MethodGet, "/api/v1/hosts", raw, nil)
 	if w.Code != http.StatusUnauthorized {
 		t.Errorf("ingest token on /hosts = %d, want 401", w.Code)
 	}
@@ -291,5 +295,19 @@ func TestIngestTokenAuthorizesEventsOnly(t *testing.T) {
 	w = do(a, http.MethodPost, "/api/v1/hosts/"+h.ID+"/events", "wrong-token", []any{})
 	if w.Code != http.StatusUnauthorized {
 		t.Errorf("wrong ingest token on /events = %d, want 401", w.Code)
+	}
+
+	// The right host accepts its token.
+	w = do(a, http.MethodPost, "/api/v1/hosts/"+h.ID+"/events", raw, []any{})
+	if w.Code != http.StatusOK {
+		t.Errorf("host-bound ingest token = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+
+	// A credential for one host cannot impersonate another host.
+	other := &store.Host{Hostname: "db-01"}
+	_ = a.Store.CreateHost(ctx, other)
+	w = do(a, http.MethodPost, "/api/v1/hosts/"+other.ID+"/events", raw, []any{})
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("cross-host ingest token = %d, want 401", w.Code)
 	}
 }

@@ -59,8 +59,8 @@ func TestMemoryUsersAndSessions(t *testing.T) {
 	}
 
 	// A live session resolves to its user; an expired one does not.
-	live := &Session{Token: "live", UserID: u.ID, ExpiresAt: time.Now().Add(time.Hour)}
-	expired := &Session{Token: "expired", UserID: u.ID, ExpiresAt: time.Now().Add(-time.Minute)}
+	live := &Session{TokenHash: "live", UserID: u.ID, ExpiresAt: time.Now().Add(time.Hour)}
+	expired := &Session{TokenHash: "expired", UserID: u.ID, ExpiresAt: time.Now().Add(-time.Minute)}
 	_ = m.CreateSession(ctx, live)
 	_ = m.CreateSession(ctx, expired)
 	if su, err := m.SessionUser(ctx, "live"); err != nil || su.Username != "alice" {
@@ -87,8 +87,8 @@ func TestMemoryDeleteExpiredSessions(t *testing.T) {
 	if err := m.CreateUser(ctx, u); err != nil {
 		t.Fatal(err)
 	}
-	_ = m.CreateSession(ctx, &Session{Token: "live", UserID: u.ID, ExpiresAt: time.Now().Add(time.Hour)})
-	_ = m.CreateSession(ctx, &Session{Token: "dead", UserID: u.ID, ExpiresAt: time.Now().Add(-time.Hour)})
+	_ = m.CreateSession(ctx, &Session{TokenHash: "live", UserID: u.ID, ExpiresAt: time.Now().Add(time.Hour)})
+	_ = m.CreateSession(ctx, &Session{TokenHash: "dead", UserID: u.ID, ExpiresAt: time.Now().Add(-time.Hour)})
 
 	n, err := m.DeleteExpiredSessions(ctx)
 	if err != nil || n != 1 {
@@ -99,6 +99,31 @@ func TestMemoryDeleteExpiredSessions(t *testing.T) {
 	}
 	if again, _ := m.DeleteExpiredSessions(ctx); again != 0 {
 		t.Fatalf("second prune should remove nothing, got %d", again)
+	}
+}
+
+func TestMemoryRetentionArchivesOnlyClosedObservations(t *testing.T) {
+	ctx := context.Background()
+	m := NewMemory()
+	h := &Host{Hostname: "h"}
+	_ = m.CreateHost(ctx, h)
+	closed, _ := m.UpsertObservation(ctx, &Observation{HostID: h.ID, RuleID: "closed", Severity: "low", DedupKey: "closed", Status: ObsResolved})
+	open, _ := m.UpsertObservation(ctx, &Observation{HostID: h.ID, RuleID: "open", Severity: "high", DedupKey: "open", Status: ObsOpen})
+	m.mu.Lock()
+	m.obs[closed.ID].LastSeen = time.Now().Add(-48 * time.Hour)
+	m.obs[open.ID].LastSeen = time.Now().Add(-48 * time.Hour)
+	m.mu.Unlock()
+
+	result, err := m.ApplyRetention(ctx, RetentionPolicy{ObservationAge: 24 * time.Hour})
+	if err != nil || result.Observations != 1 {
+		t.Fatalf("retention = %+v, %v", result, err)
+	}
+	if _, err := m.GetObservation(ctx, open.ID); err != nil {
+		t.Fatalf("open observation was removed: %v", err)
+	}
+	archive, _ := m.ListArchive(ctx, "observation", 10)
+	if len(archive) != 1 || archive[0].OriginalID != closed.ID {
+		t.Fatalf("archive = %+v", archive)
 	}
 }
 

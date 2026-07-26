@@ -23,9 +23,9 @@ func aptRepoInsecure(line string) bool {
 	return false
 }
 
-// yumGpgcheckOff reports whether a yum/dnf line disables PACKAGE signature
+// yumGpgcheckOff reports whether a yum/dnf line disables package signature
 // checking (gpgcheck=0). It deliberately does NOT flag repo_gpgcheck=0 (repo
-// METADATA signing): packages are still verified by gpgcheck, and repo_gpgcheck=0
+// metadata signing): packages are still verified by gpgcheck, and repo_gpgcheck=0
 // is the shipped default of common repos such as EPEL, so flagging it produces a
 // false positive on every RHEL host that has EPEL enabled.
 func yumGpgcheckOff(line string) bool {

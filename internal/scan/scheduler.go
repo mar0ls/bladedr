@@ -8,22 +8,20 @@ import (
 	"bladedr/internal/store"
 )
 
-// scanRunner is the subset of *Runner the scheduler needs; an interface so the
-// due-evaluation logic can be unit-tested with a stub.
-type scanRunner interface {
-	Scan(ctx context.Context, h *store.Host, trigger string) (*store.Scan, error)
+// scanEnqueuer is the durable queue subset used by the scheduler.
+type scanEnqueuer interface {
+	Enqueue(ctx context.Context, h *store.Host, trigger string) (*store.ScanJob, error)
 }
 
 // Scheduler runs due scan schedules from the store on a fixed tick. A schedule
 // with an empty HostID targets every host; otherwise just the named host. After
 // firing a schedule its LastRun/NextRun are advanced by IntervalS.
 type Scheduler struct {
-	Store       store.Store
-	Runner      scanRunner
-	Tick        time.Duration    // how often to check for due schedules (default 30s)
-	ScanTimeout time.Duration    // per-host scan deadline (default 5m); bounds a hung host
-	Now         func() time.Time // injectable clock (tests)
-	Logf        func(string, ...any)
+	Store store.Store
+	Queue scanEnqueuer
+	Tick  time.Duration    // how often to check for due schedules (default 30s)
+	Now   func() time.Time // injectable clock (tests)
+	Logf  func(string, ...any)
 }
 
 func (s *Scheduler) now() time.Time {
@@ -103,16 +101,10 @@ func (s *Scheduler) fire(ctx context.Context, sc *store.Schedule) {
 		s.logf("scheduler: schedule %s resolve hosts: %v", sc.ID, err)
 		return
 	}
-	timeout := s.ScanTimeout
-	if timeout <= 0 {
-		timeout = 5 * time.Minute
-	}
 	for _, h := range hosts {
-		sctx, cancel := context.WithTimeout(ctx, timeout)
-		_, err := s.Runner.Scan(sctx, h, store.TriggerScheduled)
-		cancel()
+		_, err := s.Queue.Enqueue(ctx, h, store.TriggerScheduled)
 		if err != nil {
-			s.logf("scheduler: scan host %s: %v", h.ID, err)
+			s.logf("scheduler: enqueue host %s: %v", h.ID, err)
 		}
 	}
 }

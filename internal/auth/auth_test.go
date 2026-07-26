@@ -3,6 +3,7 @@ package auth
 import (
 	"net/http"
 	"testing"
+	"time"
 
 	"bladedr/internal/store"
 )
@@ -20,6 +21,30 @@ func TestHashAndCheckPassword(t *testing.T) {
 	}
 	if CheckPassword(hash, "wrong password") {
 		t.Error("CheckPassword accepted a wrong password")
+	}
+}
+
+func TestTokenDigestDoesNotPersistBearer(t *testing.T) {
+	token := NewToken()
+	digest := TokenDigest(token)
+	if digest == token || len(digest) != 64 {
+		t.Fatalf("unexpected token digest %q", digest)
+	}
+	if digest != TokenDigest(token) {
+		t.Fatal("token digest is not deterministic")
+	}
+}
+
+func TestTOTPMatchesRFC6238Vector(t *testing.T) {
+	// RFC 6238's shared ASCII secret, base32 encoded. At T=1 the interoperable
+	// 8-digit vector is 94287082; a six-digit authenticator uses the same dynamic
+	// truncation modulo 10^6 and therefore yields 287082.
+	const secret = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
+	if !VerifyTOTP(secret, "287082", time.Unix(59, 0)) {
+		t.Fatal("valid RFC 6238 code was rejected")
+	}
+	if VerifyTOTP(secret, "287083", time.Unix(59, 0)) {
+		t.Fatal("invalid TOTP code was accepted")
 	}
 }
 
@@ -82,6 +107,19 @@ func TestAllowed(t *testing.T) {
 				t.Errorf("Allowed(%q, %q, %q) = %v, want %v", tc.role, tc.method, tc.path, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestSensorTokenManagementIsAdminOnly(t *testing.T) {
+	path := "/api/v1/hosts/host-1/sensor-tokens"
+	if Allowed(store.RoleOperator, http.MethodPost, path) {
+		t.Fatal("operator can mint a sensor credential")
+	}
+	if Allowed(store.RoleViewer, http.MethodGet, path) {
+		t.Fatal("viewer can list sensor credentials")
+	}
+	if !Allowed(store.RoleAdmin, http.MethodPost, path) {
+		t.Fatal("admin cannot mint a sensor credential")
 	}
 }
 

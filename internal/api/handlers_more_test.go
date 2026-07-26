@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"bladedr/internal/store"
@@ -90,6 +92,89 @@ func TestRiskEndpoints(t *testing.T) {
 	for _, path := range []string{"/api/v1/risk/stats", "/api/v1/risk/observations"} {
 		if w := do(a, "GET", path, tok[store.RoleViewer], nil); w.Code != http.StatusOK {
 			t.Fatalf("GET %s = %d, want 200", path, w.Code)
+		}
+	}
+}
+
+func TestRiskEndpointsRejectMalformedDataset(t *testing.T) {
+	a, tok := newTestAPI(t)
+	path := filepath.Join(t.TempDir(), "dataset.jsonl")
+	if err := os.WriteFile(path, []byte(`{"rule_id":"r1","label":"typo"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	a.RiskDataset = path
+
+	for _, endpoint := range []string{"/api/v1/risk/stats", "/api/v1/risk/observations"} {
+		w := do(a, "GET", endpoint, tok[store.RoleViewer], nil)
+		if w.Code != http.StatusInternalServerError {
+			t.Fatalf("GET %s = %d, want 500", endpoint, w.Code)
+		}
+	}
+}
+
+type observationFilterStore struct {
+	*store.Memory
+	filters []store.ObservationFilter
+}
+
+func (s *observationFilterStore) ListObservations(ctx context.Context, filter store.ObservationFilter) ([]*store.Observation, error) {
+	s.filters = append(s.filters, filter)
+	return s.Memory.ListObservations(ctx, filter)
+}
+
+func TestProductionRiskLabelsUseSeparateClassWindows(t *testing.T) {
+	ctx := context.Background()
+	st := &observationFilterStore{Memory: store.NewMemory()}
+	for _, observation := range []*store.Observation{
+		{RuleID: "real", DedupKey: "real", Status: store.ObsAcknowledged},
+		{RuleID: "noise", DedupKey: "noise", Status: store.ObsFalsePositive},
+		{RuleID: "pending", DedupKey: "pending", Status: store.ObsOpen},
+	} {
+		if _, err := st.UpsertObservation(ctx, observation); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	labels, err := (&API{Store: st}).productionRiskLabels(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(labels) != 2 {
+		t.Fatalf("training labels = %d, want 2", len(labels))
+	}
+	if len(st.filters) != 2 {
+		t.Fatalf("ListObservations calls = %d, want 2", len(st.filters))
+	}
+	if st.filters[0].Status != store.ObsAcknowledged || st.filters[1].Status != store.ObsFalsePositive {
+		t.Fatalf("unexpected training filters: %+v", st.filters)
+	}
+	for _, filter := range st.filters {
+		if filter.Limit != riskLabelsPerClass {
+			t.Fatalf("class limit = %d, want %d", filter.Limit, riskLabelsPerClass)
+		}
+	}
+}
+
+func TestRiskObservationsUseOpenAndClassWindows(t *testing.T) {
+	a, tokens := newTestAPI(t)
+	st := &observationFilterStore{Memory: a.Store.(*store.Memory)}
+	a.Store = st
+
+	response := do(a, http.MethodGet, "/api/v1/risk/observations", tokens[store.RoleViewer], nil)
+	if response.Code != http.StatusOK {
+		t.Fatalf("risk observations = %d, want 200", response.Code)
+	}
+	if len(st.filters) != 3 {
+		t.Fatalf("ListObservations calls = %d, want 3", len(st.filters))
+	}
+	want := []store.ObservationFilter{
+		{Status: store.ObsOpen, Limit: riskOpenLimit},
+		{Status: store.ObsAcknowledged, Limit: riskLabelsPerClass},
+		{Status: store.ObsFalsePositive, Limit: riskLabelsPerClass},
+	}
+	for i := range want {
+		if st.filters[i].Status != want[i].Status || st.filters[i].Limit != want[i].Limit {
+			t.Errorf("filter %d = %+v, want %+v", i, st.filters[i], want[i])
 		}
 	}
 }

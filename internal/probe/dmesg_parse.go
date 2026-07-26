@@ -89,7 +89,7 @@ func outOfTreeModuleName(msg string) string {
 }
 
 // outOfTreeModules returns kernel taint / out-of-tree-load messages whose module
-// is NOT a known-legit DKMS module — i.e. candidate LKM rootkit loads.
+// is not a known DKMS module and may be an LKM rootkit load.
 func outOfTreeModules(log []KernelLogEntry) []string {
 	seen := map[string]bool{}
 	var out []string

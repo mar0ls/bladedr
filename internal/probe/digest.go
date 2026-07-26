@@ -36,7 +36,7 @@ func BuildStateDigest(s *Snapshot) map[string][]string {
 		d[DigestListeningPorts] = append(d[DigestListeningPorts], fmt.Sprintf("%s/%d", sk.Proto, sk.LPort))
 	}
 	for _, m := range s.KernelModules {
-		// Baseline only OUT-OF-TREE modules. In-tree modules (netfilter xt_*/nf_*,
+		// Baseline only out-of-tree modules. In-tree modules (netfilter xt_*/nf_*,
 		// veth/overlay/bridge, *_diag, ib_*, ...) load and unload on demand on any
 		// container/network-active host, so baselining them is pure churn. The
 		// security-relevant drift is a new out-of-tree module (the rootkit/driver

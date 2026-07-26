@@ -1,4 +1,4 @@
-// Package secrets implements Sandfly-style split-trust credential protection:
+// Package secrets implements split-trust credential protection:
 // secrets are sealed to a Curve25519 *public* key (anyone/the server can seal),
 // and can only be opened with the corresponding *private* key, which is held by
 // the scanning node. A compromised server database therefore yields only

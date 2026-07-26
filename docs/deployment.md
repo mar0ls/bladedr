@@ -24,19 +24,22 @@ loses it on restart — fine for a demo, not for production.
 
 ## Secrets
 
-Two things must be generated once and kept:
+Generate the node key once and keep it:
 
 ```sh
 ./bladedr-server -keygen            # prints BLADEDR_NODE_KEY
 ```
 
-- `BLADEDR_NODE_KEY` — decrypts sealed SSH credentials. **If you lose it, every stored
-  credential is unrecoverable** (by design — the database alone can't decrypt them).
-  Back it up separately from the database.
-- `BLADEDR_INGEST_TOKEN` — shared bearer token the sensors use. Generate 24+ random
-  bytes. To rotate: set it to `new,old`, redeploy sensors, then drop `old`.
+`BLADEDR_NODE_KEY` decrypts sealed SSH credentials. **If you lose it, every stored
+credential is unrecoverable** (by design — the database alone can't decrypt them). Back
+it up separately from the database, or you'll restore a dump into a server that can't
+log into anything.
 
-Keep these in the unit's `EnvironmentFile` (mode 0600), not on the command line.
+Sensor tokens need no such care: they're per-host, the server stores only digests, and
+deployment mints and rotates them for you. Revoke and redeploy if one leaks.
+
+Keep the server's secrets in the unit's `EnvironmentFile` (mode 0600), not on the
+command line.
 
 ## TLS
 
@@ -48,14 +51,16 @@ BLADEDR_TLS_CERT=/etc/bladedr/tls.crt BLADEDR_TLS_KEY=/etc/bladedr/tls.key ./bla
 
 or terminate TLS at a reverse proxy (nginx/Caddy) and set `BLADEDR_SECURE_COOKIES=1`
 so the session cookie still gets the `Secure` flag. Behind a proxy, forward the client
-IP as `X-Forwarded-For` — the login rate-limiter and audit log key off it.
+IP as `X-Forwarded-For` — the login rate-limiter and audit log key off it. Set
+`BLADEDR_TRUSTED_PROXY_CIDRS` to your proxy's network first: without it the header is
+ignored, which is the right default, since anyone who can reach the server directly
+could otherwise spoof a source IP and dodge the login lockout.
 
-Don't run the console over plaintext beyond a trusted LAN; it carries the fleet's SSH
-access.
+Don't put the console on plaintext outside a trusted network.
 
 ## systemd unit
 
-Run it as a dedicated non-root user with the sandboxing systemd gives you for free:
+Run the server as a dedicated non-root user:
 
 ```ini
 # /etc/systemd/system/bladedr-server.service
@@ -79,18 +84,16 @@ PrivateTmp=true
 WantedBy=multi-user.target
 ```
 
-State lives in Postgres, so the server needs no writable path on disk — `ProtectSystem=strict`
-with no `ReadWritePaths` is fine (it only reads the env file and, if used, the TLS certs).
+State is stored in Postgres, so the service needs no writable filesystem path.
+`ProtectSystem=strict` can be used without `ReadWritePaths`.
 
 `/etc/bladedr/server.env` holds `BLADEDR_DATABASE_URL`, `BLADEDR_NODE_KEY`,
-`BLADEDR_INGEST_TOKEN`, `BLADEDR_TLS_*`, `BLADEDR_ADMIN_PASSWORD`, and
-`BLADEDR_LOG_FORMAT=json`.
+`BLADEDR_TLS_*`, `BLADEDR_ADMIN_PASSWORD`, and `BLADEDR_LOG_FORMAT=json`.
 
 ## Health and metrics
 
 - `GET /healthz` — liveness.
-- `GET /readyz` — readiness; returns 503 until the database is reachable, so a load
-  balancer holds traffic during a restart or DB blip.
+- `GET /readyz` — readiness; returns 503 until the database is reachable.
 - `GET /metrics` — Prometheus text (request counts by method/status, latency summary).
 
 These are unauthenticated; keep them on an internal interface or restrict them at the
@@ -102,8 +105,9 @@ proxy.
 pg_dump "$BLADEDR_DATABASE_URL" > bladedr-$(date +%F).sql   # data
 ```
 
-The dump plus `BLADEDR_NODE_KEY` is a full backup. Restore is a fresh Postgres, load
-the dump, start the server with the same node key. Migrations reconcile the schema.
+The dump and `BLADEDR_NODE_KEY` form a complete backup. Restore the dump into a fresh
+Postgres instance and start the server with the same node key. Startup migrations
+reconcile the schema.
 
 ## Upgrades
 

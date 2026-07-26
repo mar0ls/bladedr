@@ -1,14 +1,14 @@
-// Package risk is bladedr's explainable risk-scoring tier: a multinomial Naive
-// Bayes model trained on analyst-triaged observations. It learns which structural
-// features (rule, category, severity, source, MITRE technique/tactic) separate
-// real findings (acknowledged/resolved) from false positives, and outputs a 0-100
-// priority plus the features that drove it. No external ML runtime — small,
-// deterministic and auditable, matching bladedr's single-binary ethos.
+// Package risk is bladedr's explainable risk-scoring tier: a multinomial Naive Bayes
+// model trained on analyst-triaged observations. It learns which structural features
+// (rule, category, severity, source, MITRE technique/tactic) separate real findings
+// from false positives, and outputs a 0-100 priority plus the features that drove it.
+// No external ML runtime — small, deterministic and auditable, matching bladedr's
+// single-binary ethos.
 //
-// It is a PRIORITISER, not a detector: rules decide what is a finding; this model
-// ranks findings by how likely an analyst is to treat them as real, learned from
-// past triage. It is honest about small data — Evaluate reports whether the
-// labelled set is large/balanced/accurate enough to trust (see Stats.Trustworthy).
+// It is a prioritiser, not a detector: rules decide what is a finding; this model
+// ranks findings by how likely an analyst is to treat them as real, learned from past
+// triage. It is honest about small data — Evaluate reports whether the labelled set is
+// large/balanced/accurate enough to trust (see Stats.Trustworthy).
 package risk
 
 import (
@@ -26,17 +26,17 @@ type Label int
 const (
 	Unlabeled Label = iota
 	Negative        // triaged false_positive
-	Positive        // acknowledged or resolved (an analyst engaged with it)
+	Positive        // acknowledged
 )
 
 // LabelOf maps a triage status to a training label. Only unambiguous dispositions
 // supervise the model: acknowledged = a real finding an analyst is working
 // (positive), false_positive = noise the analyst dismissed (negative). Open
-// (untriaged) and resolved are Unlabeled and excluded: "resolved" is ambiguous —
-// it conflates "real threat, remediated" with "benign change, reviewed and closed"
-// (and bladedr uses it heavily for the latter — benign baseline drift, test plants),
-// so it would pollute the positive class. The poligon supplies clean, ground-truth
-// positives instead (lab examples are written as acknowledged).
+// (untriaged) and resolved are Unlabeled and excluded: "resolved" is ambiguous — it
+// conflates "real threat, remediated" with "benign change, reviewed and closed" (and
+// bladedr uses it heavily for the latter — benign baseline drift, test plants), so it
+// would pollute the positive class. The poligon supplies clean, ground-truth positives
+// instead (lab examples are written as acknowledged).
 func LabelOf(status string) Label {
 	switch status {
 	case store.ObsFalsePositive:
@@ -48,39 +48,42 @@ func LabelOf(status string) Label {
 	}
 }
 
-// Features extracts the structural, name-free feature tokens of an observation.
-// Never the literal evidence (paths/names/args are attacker-controlled and won't
-// generalise) — only the rule identity, its taxonomy, and COARSE CLASSES derived
-// from evidence (path/uid/parent bucketed into a handful of categories). The
-// classes let the model separate within a rule (e.g. a systemd ExecStart in
-// path:tmp vs path:home) while staying name-free, so it still learns shape not IOCs.
+// Features extracts structural tokens and coarse evidence classes. Literal paths,
+// process names and arguments are excluded because they are attacker-controlled and
+// do not generalise across hosts.
 func Features(o *store.Observation) []string {
-	feats := []string{
-		"rule:" + o.RuleID,
-		"cat:" + o.Category,
-		"sev:" + o.Severity,
-		"src:" + o.Source,
+	feats := make([]string, 0, 10)
+	add := func(feature string) {
+		for _, existing := range feats {
+			if existing == feature {
+				return
+			}
+		}
+		feats = append(feats, feature)
 	}
+	add("rule:" + o.RuleID)
+	add("cat:" + o.Category)
+	add("sev:" + o.Severity)
+	add("src:" + o.Source)
 	for _, m := range o.Mitre {
-		feats = append(feats, "tech:"+m)
+		add("tech:" + m)
 		if i := strings.IndexByte(m, '.'); i > 0 { // tactic-level T1543 from T1543.002
-			feats = append(feats, "tac:"+m[:i])
+			add("tac:" + m[:i])
 		}
 	}
 	if c := pathClass(o.Evidence); c != "" {
-		feats = append(feats, "path:"+c)
+		add("path:" + c)
 	}
 	if c := uidClass(o.Evidence); c != "" {
-		feats = append(feats, "uid:"+c)
+		add("uid:" + c)
 	}
 	if c := parentClass(o.Evidence); c != "" {
-		feats = append(feats, "parent:"+c)
+		add("parent:" + c)
 	}
 	return feats
 }
 
-// pathClass buckets the first path-like evidence value into a coarse, name-free
-// class (tmp/shm/home/etc/...), so the model keys on WHERE not the literal path.
+// pathClass maps the first path-like evidence value to a directory class.
 func pathClass(ev map[string]any) string {
 	keys := []string{"path", "binary", "exec_start", "entry", "dir", "interp", "command"}
 	var p string
@@ -233,9 +236,8 @@ type Result struct {
 	Top      []Contribution `json:"top,omitempty"`
 }
 
-// Score returns the risk priority for an observation. Until the model has both
-// classes it returns the rule's static score as a neutral prior (Trained=false),
-// so the endpoint degrades gracefully on a fresh deployment.
+// Score returns the risk priority for an observation. Without both classes it
+// returns the rule's static score and sets Trained to false.
 func (m *Model) Score(o *store.Observation) Result {
 	if !m.Trained() {
 		p := float64(o.Score) / 100
@@ -246,12 +248,17 @@ func (m *Model) Score(o *store.Observation) Result {
 	logNeg := math.Log(float64(m.classDoc[Negative]) / total)
 	contribs := make([]Contribution, 0, 8)
 	for _, f := range Features(o) {
+		if _, known := m.vocab[f]; !known {
+			// An unseen category carries no learned evidence for either class.
+			// Ignoring it also avoids a bias toward the class with fewer tokens.
+			continue
+		}
 		lp, ln := m.logProb(Positive, f), m.logProb(Negative, f)
 		logPos += lp
 		logNeg += ln
 		contribs = append(contribs, Contribution{Feature: f, Weight: lp - ln})
 	}
-	p := 1.0 / (1.0 + math.Exp(logNeg-logPos)) // two-class softmax
+	p := positiveProbability(logPos, logNeg)
 	sort.Slice(contribs, func(i, j int) bool {
 		return math.Abs(contribs[i].Weight) > math.Abs(contribs[j].Weight)
 	})
@@ -261,21 +268,38 @@ func (m *Model) Score(o *store.Observation) Result {
 	return Result{Priority: int(math.Round(p * 100)), Prob: p, Trained: true, Top: contribs}
 }
 
-// Stats is an honest assessment of whether there is enough labelled data to trust
-// the model — the evidence behind "should we use ML yet?".
-type Stats struct {
-	Labeled     int     `json:"labeled"`
-	Positives   int     `json:"positives"`
-	Negatives   int     `json:"negatives"`
-	BaseRate    float64 `json:"base_rate"`   // accuracy of always guessing the majority class
-	CVAccuracy  float64 `json:"cv_accuracy"` // leave-one-out cross-validated accuracy
-	Trustworthy bool    `json:"trustworthy"`
-	Reason      string  `json:"reason"`
+func positiveProbability(logPos, logNeg float64) float64 {
+	if logPos >= logNeg {
+		ratio := math.Exp(logNeg - logPos)
+		return 1 / (1 + ratio)
+	}
+	ratio := math.Exp(logPos - logNeg)
+	return ratio / (1 + ratio)
 }
 
-// Evaluate measures the model on the triaged set via leave-one-out cross-validation
-// and decides whether the data is sufficient. The thresholds are conservative: a
-// small or one-sided or non-separable set is reported as not yet trustworthy.
+// Stats describes cross-validated model quality and training-set sufficiency.
+type Stats struct {
+	Labeled            int     `json:"labeled"`
+	Positives          int     `json:"positives"`
+	Negatives          int     `json:"negatives"`
+	BaseRate           float64 `json:"base_rate"` // accuracy of always guessing the majority class
+	CVAccuracy         float64 `json:"cv_accuracy"`
+	CVBalancedAccuracy float64 `json:"cv_balanced_accuracy"`
+	CVPrecision        float64 `json:"cv_precision"`
+	CVRecall           float64 `json:"cv_recall"`
+	CVROCAUC           float64 `json:"cv_roc_auc"`
+	CVBrierScore       float64 `json:"cv_brier_score"`
+	Trustworthy        bool    `json:"trustworthy"`
+	Reason             string  `json:"reason"`
+}
+
+type prediction struct {
+	prob     float64
+	positive bool
+}
+
+// Evaluate uses deterministic stratified cross-validation. Five folds keep the
+// evaluation linear in the number of labelled observations.
 func Evaluate(obs []*store.Observation) Stats {
 	var labeled []*store.Observation
 	var pos, neg int
@@ -300,33 +324,125 @@ func Evaluate(obs []*store.Observation) Stats {
 	}
 	st.BaseRate = float64(major) / float64(len(labeled))
 
-	correct := 0
-	for i, o := range labeled {
-		train := make([]*store.Observation, 0, len(labeled)-1)
-		train = append(train, labeled[:i]...)
-		train = append(train, labeled[i+1:]...)
-		m := Train(train)
-		pred := m.Score(o).Prob >= 0.5
-		if pred == (LabelOf(o.Status) == Positive) {
-			correct++
-		}
+	minClass := min(pos, neg)
+	if minClass >= 2 {
+		predictions := crossValidate(labeled, min(5, minClass))
+		st.CVAccuracy, st.CVBalancedAccuracy, st.CVPrecision, st.CVRecall,
+			st.CVROCAUC, st.CVBrierScore = predictionMetrics(predictions)
 	}
-	st.CVAccuracy = float64(correct) / float64(len(labeled))
 
-	minClass := pos
-	if neg < pos {
-		minClass = neg
-	}
 	switch {
 	case len(labeled) < 30:
 		st.Reason = "too few labelled observations (have " + strconv.Itoa(len(labeled)) + ", need ~30+) — keep triaging"
 	case minClass < 8:
 		st.Reason = "one class too small (need ~8+ of each real and false-positive) — the fleet is mostly clean, so generate real positives via the attack-emulation lab"
-	case st.CVAccuracy <= st.BaseRate+0.05:
-		st.Reason = "no better than guessing the majority class — current features don't separate real from false-positive yet"
+	case st.CVROCAUC < 0.65:
+		st.Reason = "cross-validated ranking is weak (ROC AUC below 0.65) — current features don't separate real from false-positive yet"
 	default:
 		st.Trustworthy = true
 		st.Reason = "enough balanced, separable data to prioritise findings"
 	}
 	return st
+}
+
+func crossValidate(labeled []*store.Observation, folds int) []prediction {
+	foldOf := make([]int, len(labeled))
+	nextFold := [3]int{}
+	for i, o := range labeled {
+		label := LabelOf(o.Status)
+		foldOf[i] = nextFold[label] % folds
+		nextFold[label]++
+	}
+
+	out := make([]prediction, 0, len(labeled))
+	for fold := 0; fold < folds; fold++ {
+		train := make([]*store.Observation, 0, len(labeled))
+		for i, o := range labeled {
+			if foldOf[i] != fold {
+				train = append(train, o)
+			}
+		}
+		model := Train(train)
+		for i, o := range labeled {
+			if foldOf[i] == fold {
+				out = append(out, prediction{
+					prob:     model.Score(o).Prob,
+					positive: LabelOf(o.Status) == Positive,
+				})
+			}
+		}
+	}
+	return out
+}
+
+func predictionMetrics(predictions []prediction) (accuracy, balancedAccuracy, precision, recall, rocAUC, brier float64) {
+	if len(predictions) == 0 {
+		return 0, 0, 0, 0, 0, 0
+	}
+
+	var tp, tn, fp, fn int
+	for _, p := range predictions {
+		predictedPositive := p.prob >= 0.5
+		switch {
+		case p.positive && predictedPositive:
+			tp++
+		case p.positive:
+			fn++
+		case predictedPositive:
+			fp++
+		default:
+			tn++
+		}
+		target := 0.0
+		if p.positive {
+			target = 1
+		}
+		delta := p.prob - target
+		brier += delta * delta
+	}
+
+	accuracy = float64(tp+tn) / float64(len(predictions))
+	recall = ratio(tp, tp+fn)
+	specificity := ratio(tn, tn+fp)
+	balancedAccuracy = (recall + specificity) / 2
+	precision = ratio(tp, tp+fp)
+	rocAUC = areaUnderROC(predictions)
+	brier /= float64(len(predictions))
+	return accuracy, balancedAccuracy, precision, recall, rocAUC, brier
+}
+
+func ratio(numerator, denominator int) float64 {
+	if denominator == 0 {
+		return 0
+	}
+	return float64(numerator) / float64(denominator)
+}
+
+func areaUnderROC(predictions []prediction) float64 {
+	ranked := append([]prediction(nil), predictions...)
+	sort.SliceStable(ranked, func(i, j int) bool { return ranked[i].prob < ranked[j].prob })
+
+	var rankSum float64
+	var positives, negatives int
+	for start := 0; start < len(ranked); {
+		end := start + 1
+		for end < len(ranked) && ranked[end].prob == ranked[start].prob {
+			end++
+		}
+		averageRank := float64(start+1+end) / 2
+		for _, p := range ranked[start:end] {
+			if p.positive {
+				rankSum += averageRank
+				positives++
+			} else {
+				negatives++
+			}
+		}
+		start = end
+	}
+	if positives == 0 || negatives == 0 {
+		return 0
+	}
+	return (rankSum - float64(positives*(positives+1))/2) /
+		float64(positives*negatives)
 }

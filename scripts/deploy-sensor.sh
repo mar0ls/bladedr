@@ -11,6 +11,8 @@
 #   BLADEDR_SERVER       control-plane URL reachable from the host (default http://<this-ip>:8080)
 #   BLADEDR_POLICY_DIR   TracingPolicy bundle (default ./linux-probe-shield)
 #   BLADEDR_TETRAGON     tetragon image (default quay.io/cilium/tetragon:v1.7.0)
+#   BLADEDR_SENSOR_TOKEN per-host token returned by POST /hosts/{id}/sensor-tokens
+#   BLADEDR_TOKEN        admin session token used to mint one when the above is unset
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -19,8 +21,34 @@ HOST_ID="${2:?bladedr host id required}"
 POLICY_DIR="${BLADEDR_POLICY_DIR:-linux-probe-shield}"
 TETRAGON="${BLADEDR_TETRAGON:-quay.io/cilium/tetragon:v1.7.0}"
 SERVER="${BLADEDR_SERVER:-http://$(ipconfig getifaddr en0 2>/dev/null || hostname -I 2>/dev/null | awk '{print $1}'):8080}"
+TOKEN="${BLADEDR_SENSOR_TOKEN:-}"
+TOKEN_ID=""
+DEPLOYED=0
 
 [ -d "$POLICY_DIR" ] || { echo "policy dir not found: $POLICY_DIR" >&2; exit 1; }
+[[ "$HOST_ID" =~ ^[0-9a-fA-F-]{36}$ ]] || { echo "invalid bladedr host id" >&2; exit 1; }
+
+remote_quote() { python3 -c 'import shlex,sys; print(shlex.quote(sys.argv[1]))' "$1"; }
+SERVER_Q=$(remote_quote "$SERVER")
+HOST_ID_Q=$(remote_quote "$HOST_ID")
+TETRAGON_Q=$(remote_quote "$TETRAGON")
+
+if [ -z "$TOKEN" ]; then
+  API_TOKEN="${BLADEDR_TOKEN:?set BLADEDR_SENSOR_TOKEN, or BLADEDR_TOKEN so this script can mint a per-host token}"
+  echo "==> minting a per-host sensor credential"
+  RESPONSE=$(curl -fsS -X POST "$SERVER/api/v1/hosts/$HOST_ID/sensor-tokens" \
+    -H "Authorization: Bearer $API_TOKEN" -H 'content-type: application/json' -d '{}')
+  TOKEN=$(printf '%s' "$RESPONSE" | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')
+  TOKEN_ID=$(printf '%s' "$RESPONSE" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+fi
+
+cleanup() {
+  if [ "$DEPLOYED" -eq 0 ] && [ -n "$TOKEN_ID" ]; then
+    curl -fsS -X DELETE "$SERVER/api/v1/hosts/$HOST_ID/sensor-tokens/$TOKEN_ID" \
+      -H "Authorization: Bearer ${BLADEDR_TOKEN:-}" >/dev/null 2>&1 || true
+  fi
+}
+trap cleanup EXIT
 
 echo "==> cross-building bladedr-sensor (linux/amd64)"
 GOOS=linux GOARCH=amd64 go build -o /tmp/bladedr-sensor.linux ./cmd/bladedr-sensor
@@ -29,6 +57,7 @@ echo "==> copying policies + sensor to $TARGET"
 ssh "$TARGET" 'rm -rf /tmp/bladedr-shield /tmp/bladedr-tetra && mkdir -p /tmp/bladedr-shield /tmp/bladedr-tetra'
 scp -q "$POLICY_DIR"/shield-*.y*ml "$TARGET":/tmp/bladedr-shield/
 scp -q /tmp/bladedr-sensor.linux "$TARGET":/tmp/bladedr-sensor
+printf 'BLADEDR_INGEST_TOKEN=%s\n' "$TOKEN" | ssh "$TARGET" 'umask 077; cat > /tmp/bladedr-sensor.env'
 
 # Tetragon validates ALL policies at load and aborts on any failure, so a large
 # bundle must be curated per kernel: drop policies whose non-syscall kprobe symbol
@@ -53,15 +82,17 @@ ssh "$TARGET" "sudo docker rm -f tetragon >/dev/null 2>&1 || true; sudo docker r
   -v /sys/fs/bpf:/sys/fs/bpf:rw \
   -v /tmp/bladedr-shield:/etc/tetragon/tetragon.tp.d:ro \
   -v /tmp/bladedr-tetra:/var/log/tetragon:rw \
-  $TETRAGON --export-filename /var/log/tetragon/tetragon.log \
+  $TETRAGON_Q --export-filename /var/log/tetragon/tetragon.log \
   --tracing-policy-dir /etc/tetragon/tetragon.tp.d >/dev/null"
 
 echo "==> starting bladedr-sensor -> $SERVER (host $HOST_ID)"
 ssh "$TARGET" "chmod +x /tmp/bladedr-sensor; sudo setsid sh -c \
-  'nohup /tmp/bladedr-sensor --export-file /tmp/bladedr-tetra/tetragon.log \
-     --policy-dir /tmp/bladedr-shield --server $SERVER --host-id $HOST_ID \
+  '. /tmp/bladedr-sensor.env; rm -f /tmp/bladedr-sensor.env; export BLADEDR_INGEST_TOKEN; \
+   nohup /tmp/bladedr-sensor --export-file /tmp/bladedr-tetra/tetragon.log \
+     --policy-dir /tmp/bladedr-shield --server $SERVER_Q --host-id $HOST_ID_Q \
      >/tmp/bladedr-sensor.log 2>&1 &'"
 
+DEPLOYED=1
 echo "==> done. Tetragon + sensor running on $TARGET (mode scan_plus_sensor)."
 echo "    sensor log: ssh $TARGET 'tail -f /tmp/bladedr-sensor.log'"
 echo "    stop:       ssh $TARGET 'sudo docker rm -f tetragon; sudo pkill -f bladedr-sensor'"

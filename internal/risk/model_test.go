@@ -1,6 +1,7 @@
 package risk
 
 import (
+	"reflect"
 	"testing"
 
 	"bladedr/internal/store"
@@ -26,15 +27,22 @@ func TestLabelOf(t *testing.T) {
 }
 
 func TestFeaturesStructuralOnly(t *testing.T) {
-	o := obs("systemd-timer-suspicious", "persistence", "high", store.ObsAcknowledged, "T1053.006")
+	o := obs("systemd-timer-suspicious", "persistence", "high", store.ObsAcknowledged, "T1053.006", "T1053.006")
 	feats := map[string]bool{}
+	techniqueCount := 0
 	for _, f := range Features(o) {
 		feats[f] = true
+		if f == "tech:T1053.006" {
+			techniqueCount++
+		}
 	}
 	for _, want := range []string{"rule:systemd-timer-suspicious", "cat:persistence", "sev:high", "src:agentless_probe", "tech:T1053.006", "tac:T1053"} {
 		if !feats[want] {
 			t.Errorf("missing feature %q in %v", want, feats)
 		}
+	}
+	if techniqueCount != 1 {
+		t.Fatalf("duplicate MITRE values produced %d identical features, want 1", techniqueCount)
 	}
 }
 
@@ -77,6 +85,28 @@ func TestScoreSeparatesRealFromFalsePositive(t *testing.T) {
 	}
 }
 
+func TestScoreIgnoresUnknownFeatures(t *testing.T) {
+	var train []*store.Observation
+	for i := 0; i < 10; i++ {
+		train = append(train, obs("real-rule", "persistence", "high", store.ObsAcknowledged))
+		train = append(train, obs("noisy-rule", "network", "low", store.ObsFalsePositive))
+	}
+	model := Train(train)
+	base := obs("real-rule", "persistence", "high", store.ObsOpen)
+	withUnknown := obs("real-rule", "persistence", "high", store.ObsOpen, "T9999.999")
+
+	baseScore := model.Score(base)
+	unknownScore := model.Score(withUnknown)
+	if baseScore.Prob != unknownScore.Prob {
+		t.Fatalf("unknown features changed probability from %v to %v", baseScore.Prob, unknownScore.Prob)
+	}
+	for _, contribution := range unknownScore.Top {
+		if contribution.Feature == "tech:T9999.999" || contribution.Feature == "tac:T9999" {
+			t.Fatalf("unknown feature included in explanation: %+v", contribution)
+		}
+	}
+}
+
 func TestEvaluateReportsInsufficientData(t *testing.T) {
 	st := Evaluate(nil)
 	if st.Trustworthy || st.Labeled != 0 {
@@ -109,5 +139,59 @@ func TestEvaluateTrustworthyOnSeparableData(t *testing.T) {
 	}
 	if st.CVAccuracy <= st.BaseRate {
 		t.Errorf("CV accuracy (%.2f) should beat base rate (%.2f)", st.CVAccuracy, st.BaseRate)
+	}
+	if st.CVROCAUC != 1 || st.CVBalancedAccuracy != 1 {
+		t.Errorf("separable data should have perfect ranking metrics: %+v", st)
+	}
+	if st.CVBrierScore <= 0 || st.CVBrierScore >= 0.25 {
+		t.Errorf("unexpected Brier score for separable data: %+v", st)
+	}
+}
+
+func TestEvaluateIsDeterministic(t *testing.T) {
+	var data []*store.Observation
+	for i := 0; i < 20; i++ {
+		data = append(data, obs("real-rule", "persistence", "high", store.ObsAcknowledged, "T1543.002"))
+		data = append(data, obs("noisy-rule", "network", "medium", store.ObsFalsePositive, "T1040"))
+	}
+	first := Evaluate(data)
+	second := Evaluate(data)
+	if !reflect.DeepEqual(first, second) {
+		t.Fatalf("Evaluate is not deterministic:\nfirst:  %+v\nsecond: %+v", first, second)
+	}
+}
+
+func TestPredictionMetrics(t *testing.T) {
+	predictions := []prediction{
+		{prob: 0.9, positive: true},
+		{prob: 0.8, positive: true},
+		{prob: 0.2, positive: false},
+		{prob: 0.1, positive: false},
+	}
+	accuracy, balanced, precision, recall, auc, brier := predictionMetrics(predictions)
+	if accuracy != 1 || balanced != 1 || precision != 1 || recall != 1 || auc != 1 {
+		t.Fatalf("perfect predictions produced incorrect metrics: accuracy=%v balanced=%v precision=%v recall=%v auc=%v",
+			accuracy, balanced, precision, recall, auc)
+	}
+	if brier <= 0 || brier >= 0.05 {
+		t.Fatalf("unexpected Brier score: %v", brier)
+	}
+
+	tied := []prediction{{prob: 0.5, positive: true}, {prob: 0.5, positive: false}}
+	_, _, _, _, auc, _ = predictionMetrics(tied)
+	if auc != 0.5 {
+		t.Fatalf("tied positive and negative should have AUC 0.5, got %v", auc)
+	}
+}
+
+func BenchmarkEvaluate(b *testing.B) {
+	data := make([]*store.Observation, 0, 10_000)
+	for i := 0; i < 5_000; i++ {
+		data = append(data, obs("real-rule", "persistence", "high", store.ObsAcknowledged, "T1543.002"))
+		data = append(data, obs("noisy-rule", "network", "medium", store.ObsFalsePositive, "T1040"))
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		Evaluate(data)
 	}
 }

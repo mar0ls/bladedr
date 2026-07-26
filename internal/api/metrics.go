@@ -12,9 +12,8 @@ import (
 	"time"
 )
 
-// metrics is a tiny, dependency-free Prometheus-text collector: request counts by
-// method + status code plus a duration summary. Enough to graph traffic, error rate
-// and latency without pulling in a client library.
+// metrics collects HTTP request counts and aggregate duration in Prometheus text
+// format.
 type metrics struct {
 	mu       sync.Mutex
 	requests map[string]int64 // "method\x00code" -> count
@@ -50,12 +49,30 @@ func (m *metrics) write(w io.Writer) {
 // statusRecorder captures the response status for metrics and access logging.
 type statusRecorder struct {
 	http.ResponseWriter
-	status int
+	status      int
+	wroteHeader bool
 }
 
 func (s *statusRecorder) WriteHeader(code int) {
+	if s.wroteHeader {
+		return
+	}
+	s.wroteHeader = true
 	s.status = code
 	s.ResponseWriter.WriteHeader(code)
+}
+
+func (s *statusRecorder) Write(p []byte) (int, error) {
+	if !s.wroteHeader {
+		s.WriteHeader(http.StatusOK)
+	}
+	return s.ResponseWriter.Write(p)
+}
+
+// Unwrap lets http.ResponseController reach optional interfaces implemented by the
+// underlying writer, including flushing and full-duplex response support.
+func (s *statusRecorder) Unwrap() http.ResponseWriter {
+	return s.ResponseWriter
 }
 
 // observe wraps the router: it times each request, records metrics, and emits one
@@ -79,7 +96,7 @@ func (a *API) observe(next http.Handler) http.Handler {
 			slog.String("path", r.URL.Path),
 			slog.Int("status", rec.status),
 			slog.Duration("dur", d),
-			slog.String("ip", clientIP(r)),
+			slog.String("ip", a.clientIP(r)),
 		)
 	})
 }

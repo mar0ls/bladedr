@@ -58,9 +58,8 @@ ensure_var BLADEDR_SENSOR_LINUX_AMD64 bin/bladedr-sensor.linux-amd64
 ensure_var BLADEDR_SENSOR_LINUX_ARM64 bin/bladedr-sensor.linux-arm64
 ensure_var BLADEDR_POLICY_DIR "$POLICY_DIR"
 ensure_var BLADEDR_SERVER_URL "$SERVER_URL"
-# Auth: machine-to-machine ingest token (sensors) + the initial admin password.
-# Generated once and persisted so re-deploys and scripts (add-host) can reuse them.
-ensure_var BLADEDR_INGEST_TOKEN "$(gen 24)"
+# Sensor credentials are minted per host by the API during server-push deployment.
+# Only the initial admin password is shared with this local deployment script.
 ensure_var BLADEDR_ADMIN_PASSWORD "$(gen 12)"
 
 echo "==> (re)starting bladedr-server"
