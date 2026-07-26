@@ -79,7 +79,12 @@ func ParseEvent(line []byte) (*Event, bool) {
 func EventToObservation(ev *Event, meta map[string]PolicyMeta, hostID string) *store.Observation {
 	m, ok := meta[ev.PolicyName]
 	if !ok {
-		m = PolicyMeta{Name: ev.PolicyName, Title: ev.PolicyName, Severity: "medium", Category: "runtime"}
+		// Tetragon reported a hit for a policy we have no file for — it was loaded into
+		// Tetragon directly, or the server's policy dir has drifted. The name is all we
+		// have, so classify from it exactly as metaFrom does instead of dropping
+		// everything into "runtime": category feeds triage filters and the risk model,
+		// and a wrong one is worse than a coarse one.
+		m = PolicyMeta{Title: ev.PolicyName, Severity: "medium", Category: categoryOf(ev.PolicyName)}
 	}
 	ev_ := map[string]any{"function": ev.Function}
 	binary := ""

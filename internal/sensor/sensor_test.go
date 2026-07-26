@@ -86,6 +86,29 @@ func TestParseAndMapEvent(t *testing.T) {
 	}
 }
 
+// Tetragon can report a hit for a policy we hold no file for — loaded into Tetragon
+// directly, or the server's policy dir has drifted from the target's. The name is then
+// all we have, and it still has to classify: category drives triage filters and is a
+// feature of the risk model, so defaulting everything to "runtime" quietly mislabels
+// findings that arrive by the one route where we already know least about them.
+func TestEventForAnUnknownPolicyIsStillCategorised(t *testing.T) {
+	for name, want := range map[string]string{
+		"exec-from-tmp":       "execution",
+		"bpf-prog-load":       "kernel",
+		"ssh-key-persistence": "persistence",
+		"outbound-dns-beacon": "network",
+		"something-unmatched": "runtime",
+	} {
+		o := EventToObservation(&Event{PolicyName: name}, map[string]PolicyMeta{}, "host-1")
+		if o.Category != want {
+			t.Errorf("%s: category = %q, want %q", name, o.Category, want)
+		}
+		if o.Title != name || o.Severity != "medium" {
+			t.Errorf("%s: fallback title/severity wrong: %q / %q", name, o.Title, o.Severity)
+		}
+	}
+}
+
 func TestParseEventIgnoresNonPolicyLines(t *testing.T) {
 	for _, l := range []string{
 		`{"process_exec":{"process":{"binary":"/bin/ls"}}}`, // base exec, no policy
