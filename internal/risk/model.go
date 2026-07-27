@@ -13,6 +13,7 @@ package risk
 
 import (
 	"math"
+	"math/rand"
 	"sort"
 	"strconv"
 	"strings"
@@ -289,8 +290,15 @@ type Stats struct {
 	CVRecall           float64 `json:"cv_recall"`
 	CVROCAUC           float64 `json:"cv_roc_auc"`
 	CVBrierScore       float64 `json:"cv_brier_score"`
-	Trustworthy        bool    `json:"trustworthy"`
-	Reason             string  `json:"reason"`
+	// CVRepeats is how many independent seeded k-fold passes the figures above average
+	// over, and CVROCAUCStdDev is the sample standard deviation of ROC AUC across them.
+	// A single pass reports a number without saying whether that number holds: resample
+	// the folds and a small or lopsided label set can move it a long way. The spread is
+	// the part that says whether to believe the mean.
+	CVRepeats      int     `json:"cv_repeats"`
+	CVROCAUCStdDev float64 `json:"cv_roc_auc_stddev"`
+	Trustworthy    bool    `json:"trustworthy"`
+	Reason         string  `json:"reason"`
 }
 
 type prediction struct {
@@ -326,9 +334,21 @@ func Evaluate(obs []*store.Observation) Stats {
 
 	minClass := min(pos, neg)
 	if minClass >= 2 {
-		predictions := crossValidate(labeled, min(5, minClass))
-		st.CVAccuracy, st.CVBalancedAccuracy, st.CVPrecision, st.CVRecall,
-			st.CVROCAUC, st.CVBrierScore = predictionMetrics(predictions)
+		folds := min(5, minClass)
+		aucs := make([]float64, 0, cvRepeats)
+		var acc, bal, prec, rec, auc, brier float64
+		for r := 0; r < cvRepeats; r++ {
+			// Fixed seed sequence: the same observations always produce the same report,
+			// which matters for a number an operator may act on, while still measuring
+			// across resamplings rather than trusting one arbitrary split.
+			a, b, p, rc, ac, br := predictionMetrics(crossValidate(labeled, folds, int64(r+1)))
+			acc, bal, prec, rec, auc, brier = acc+a, bal+b, prec+p, rec+rc, auc+ac, brier+br
+			aucs = append(aucs, ac)
+		}
+		n := float64(cvRepeats)
+		st.CVAccuracy, st.CVBalancedAccuracy, st.CVPrecision = acc/n, bal/n, prec/n
+		st.CVRecall, st.CVROCAUC, st.CVBrierScore = rec/n, auc/n, brier/n
+		st.CVRepeats, st.CVROCAUCStdDev = cvRepeats, stdDev(aucs)
 	}
 
 	switch {
@@ -338,6 +358,12 @@ func Evaluate(obs []*store.Observation) Stats {
 		st.Reason = "one class too small (need ~8+ of each real and false-positive) — the fleet is mostly clean, so generate real positives via the attack-emulation lab"
 	case st.CVROCAUC < 0.65:
 		st.Reason = "cross-validated ranking is weak (ROC AUC below 0.65) — current features don't separate real from false-positive yet"
+	case st.CVROCAUCStdDev > 0.10:
+		// A good mean over unstable folds is not a good model, it is a small label set.
+		// Reporting only the mean would present that as a result.
+		st.Reason = "ranking quality swings between resamplings (ROC AUC ±" +
+			strconv.FormatFloat(st.CVROCAUCStdDev, 'f', 2, 64) +
+			") — the labelled set is too small or too uneven for this figure to mean much yet"
 	default:
 		st.Trustworthy = true
 		st.Reason = "enough balanced, separable data to prioritise findings"
@@ -345,11 +371,51 @@ func Evaluate(obs []*store.Observation) Stats {
 	return st
 }
 
-func crossValidate(labeled []*store.Observation, folds int) []prediction {
+// crossValidate runs one stratified k-fold pass. seed shuffles the order in which rows
+// are dealt into folds; pass different seeds to get independent estimates.
+//
+// Without the shuffle, folds were assigned in the order rows came back from the store,
+// so the reported metrics were a property of insertion order rather than of the data —
+// two deployments holding identical observations could report different numbers, and
+// nothing revealed that the number moved at all.
+// cvRepeats is how many independent seeded passes Evaluate averages. The methodology
+// this borrows from (a streaming-NIDS label-efficiency study of ours) found single-split
+// evaluation flips rankings between seeds, and used >= 6 seeds so a paired Wilcoxon test
+// could clear its p-value floor. There is nothing to compare here — one model, no
+// competing method — so this reports the spread instead of a significance test, but the
+// reason for repeating at all is the same.
+const cvRepeats = 7
+
+// stdDev is the sample standard deviation (n-1), matching how the spread across seeds is
+// normally reported.
+func stdDev(xs []float64) float64 {
+	if len(xs) < 2 {
+		return 0
+	}
+	var mean float64
+	for _, x := range xs {
+		mean += x
+	}
+	mean /= float64(len(xs))
+	var ss float64
+	for _, x := range xs {
+		ss += (x - mean) * (x - mean)
+	}
+	return math.Sqrt(ss / float64(len(xs)-1))
+}
+
+func crossValidate(labeled []*store.Observation, folds int, seed int64) []prediction {
+	order := make([]int, len(labeled))
+	for i := range order {
+		order[i] = i
+	}
+	rng := rand.New(rand.NewSource(seed))
+	rng.Shuffle(len(order), func(a, b int) { order[a], order[b] = order[b], order[a] })
+
 	foldOf := make([]int, len(labeled))
 	nextFold := [3]int{}
-	for i, o := range labeled {
-		label := LabelOf(o.Status)
+	for _, i := range order {
+		label := LabelOf(labeled[i].Status)
 		foldOf[i] = nextFold[label] % folds
 		nextFold[label]++
 	}
