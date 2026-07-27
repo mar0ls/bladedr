@@ -3,7 +3,7 @@
 Notable changes. Format loosely follows [Keep a Changelog](https://keepachangelog.com);
 versions follow [SemVer](https://semver.org).
 
-## [0.9.0] - 2026-07-25
+## [0.9.0] - 2026-07-27
 
 ### Added
 - Response actions: four allowlisted playbooks (`kill_process`, `disable_systemd_unit`,
