@@ -42,6 +42,10 @@ func main() {
 		only     = flag.String("only", "", "comma-separated technique ids to run (default: all)")
 		appendDS = flag.Bool("append", false, "append to the dataset instead of overwriting")
 		keep     = flag.Bool("keep", false, "keep the container/working dir after the run")
+		// Gates for CI. The run is informational without them: it prints MISSes and
+		// exits 0, so wiring it up unguarded would watch coverage rot in silence.
+		failOnMiss = flag.Bool("fail-on-miss", false, "exit non-zero if any scenario that ran did not fire its expected rule")
+		wantTechs  = flag.Int("expect-techniques", 0, "exit non-zero unless exactly this many techniques were selected")
 	)
 	dumpBundle := flag.Bool("dump-bundle", false, "print the rule bundle JSON and exit (for ad-hoc probe runs)")
 	flag.Parse()
@@ -59,6 +63,7 @@ func main() {
 	if err := run(cfg{
 		root: *root, image: *image, target: *target, out: *out,
 		variants: splitCSV(*variants), only: splitSet(*only), appendDS: *appendDS, keep: *keep,
+		failOnMiss: *failOnMiss, wantTechs: *wantTechs,
 	}); err != nil {
 		fmt.Fprintln(os.Stderr, "bladedr-lab:", err)
 		os.Exit(1)
@@ -70,6 +75,8 @@ type cfg struct {
 	variants                 []string
 	only                     map[string]bool
 	appendDS, keep           bool
+	failOnMiss               bool
+	wantTechs                int
 }
 
 func run(c cfg) error {
@@ -86,16 +93,29 @@ func run(c cfg) error {
 		return fmt.Errorf("parse manifest: %w", err)
 	}
 	var techs []technique
+	var skipped []string
 	for _, t := range man.Techniques {
 		if len(c.only) > 0 && !c.only[t.ID] {
 			continue
 		}
 		if t.Requires == "privileged" && c.target == "" {
-			continue // needs root + a real host; skip on the container
+			skipped = append(skipped, t.ID) // needs root + a real host
+			continue
 		}
 		techs = append(techs, t)
 	}
 	fmt.Printf("==> %d techniques, %d builtin rules, variants %v\n", len(techs), len(meta), c.variants)
+	if len(skipped) > 0 {
+		// Say this out loud. The coverage line below is over the techniques that ran,
+		// so without this a run that quietly stopped exercising something still reports
+		// a perfect score.
+		fmt.Printf("==> %d technique(s) need a real host and were NOT exercised: %s\n",
+			len(skipped), strings.Join(skipped, ", "))
+	}
+	if c.wantTechs > 0 && len(techs) != c.wantTechs {
+		return fmt.Errorf("selected %d techniques, expected %d — the manifest or the skip rules changed; "+
+			"update --expect-techniques deliberately rather than letting coverage drift", len(techs), c.wantTechs)
+	}
 
 	r, labDir, probePrefix, err := setupTarget(c)
 	if err != nil {
@@ -202,13 +222,18 @@ func run(c cfg) error {
 	if err := writeDataset(filepath.Join(c.root, c.out), dataset, c.appendDS); err != nil {
 		return err
 	}
-	report(techs, c.variants, cov, dataset, c.out)
+	hit, total := report(techs, c.variants, cov, dataset, c.out)
+	if c.failOnMiss && hit != total {
+		return fmt.Errorf("%d of %d scenarios did not fire their expected rule", total-hit, total)
+	}
 	return nil
 }
 
 // report prints the detection-coverage matrix, the generalisation check, and the
 // dataset composition — the blue-team + ML summary of the run.
-func report(techs []technique, variants []string, cov map[covKey]bool, dataset []example, outPath string) {
+// report prints the run summary and returns the scenarios that fired and the total that
+// ran, so the caller can turn that into an exit status.
+func report(techs []technique, variants []string, cov map[covKey]bool, dataset []example, outPath string) (hitOut, totalOut int) {
 	total, hit := 0, 0
 	for _, t := range techs {
 		for _, v := range variants {
@@ -257,6 +282,7 @@ func report(techs []technique, variants []string, cov map[covKey]bool, dataset [
 		}
 	}
 	fmt.Printf("==> ML: %d technique-labelled POSITIVES + %d benign-but-flagged NEGATIVES ready to mix with prod triage\n", pos, neg)
+	return hit, total
 }
 
 func writeDataset(path string, dataset []example, appendMode bool) error {

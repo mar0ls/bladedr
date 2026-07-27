@@ -74,6 +74,34 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - run: pipx install semgrep && semgrep --config auto --error --quiet
 
+  # The attack-emulation range plants each technique on a disposable host, scans it with
+  # the real probe and rules, and checks the expected rule fired. Without this, a CEL
+  # expression can be edited into uselessness and every other job still passes — the unit
+  # tests assert the engine works, not that the detections do.
+  #
+  # Two gates, because either alone can be satisfied while coverage rots. --fail-on-miss
+  # catches a rule that stopped firing; --expect-techniques catches a technique that
+  # stopped being exercised, which would otherwise raise the score by shrinking the
+  # denominator.
+  #
+  # 72, not 77: five techniques need root and a real kernel (chattr +i, binfmt register,
+  # /proc bind-mount, core_pattern, Yama) and cannot run in a container. Those are
+  # verified against real hosts out of band — see poligon/README.md.
+  detections:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: cicd-sensor/cicd-sensor-action@2b76335ff1c2dd298e983961f7a200d3fe9076c2 # v0.0.36
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: '1.26'
+          cache: true
+      - name: attack-emulation range
+        run: |
+          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o bin/bladedr-probe.linux-amd64 ./cmd/bladedr-probe
+          GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -o bin/bladedr-probe.linux-arm64 ./cmd/bladedr-probe
+          go run ./cmd/bladedr-lab --fail-on-miss --expect-techniques 72
+
   smoke:
     runs-on: ubuntu-latest
     steps:
@@ -88,7 +116,7 @@ jobs:
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [build, semgrep, smoke]
+    needs: [build, semgrep, smoke, detections]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -133,7 +161,7 @@ jobs:
   # semgrep and smoke have passed on that same commit.
   image:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [build, semgrep, smoke]
+    needs: [build, semgrep, smoke, detections]
     runs-on: ubuntu-latest
     steps:
       - uses: cicd-sensor/cicd-sensor-action@2b76335ff1c2dd298e983961f7a200d3fe9076c2 # v0.0.36
