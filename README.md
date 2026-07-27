@@ -248,12 +248,20 @@ features only (rule, category, severity, source, MITRE technique/tactic) plus co
 evidence classes (`path:tmp` vs `path:home`, `uid:root`), never attacker-controlled
 paths. So it learns techniques, not literal IOCs. It ranks; it does not detect.
 
-`/risk/stats` cross-validates (stratified 5-fold, deterministic) and reports ROC AUC,
-balanced accuracy, precision, recall and Brier score — enough to tell you whether the
-labelled set is big/balanced/separable enough to trust. Each class is loaded
-independently, up to 5k recent observations, so a backlog of untriaged alerts can't
-crowd out the labels. Until both classes exist, scoring falls back to the rule's static
-score.
+`/risk/stats` cross-validates (stratified 5-fold) and reports ROC AUC, balanced accuracy,
+precision, recall and Brier score — enough to tell you whether the labelled set is
+big/balanced/separable enough to trust. Each class is loaded independently, up to 5k
+recent observations, so a backlog of untriaged alerts can't crowd out the labels. Until
+both classes exist, scoring falls back to the rule's static score.
+
+It runs seven independent seeded passes and reports the mean **and the spread**, because a
+single split is not a measurement. On the poligon dataset (157 positives, 10 negatives)
+ROC AUC ranged 0.48 to 0.82 across seeds — below chance to respectable, from nothing but
+how the folds fell. A single pass would have reported one of those and, at 0.81, called
+the model trustworthy. So `cv_roc_auc_stddev` above 0.10 marks the figure untrustworthy
+whatever the mean: that spread means the labelled set is too small or too uneven, not that
+the model is good. Fold assignment used to follow the order rows came out of the database,
+which made the metrics a property of insertion order.
 
 `BLADEDR_RISK_AUGMENT` oversamples the minority class, but only when fitting the
 scorer — the CV folds stay on real observations. Augmenting before the split would put

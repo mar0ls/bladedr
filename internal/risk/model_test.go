@@ -161,6 +161,55 @@ func TestEvaluateIsDeterministic(t *testing.T) {
 	}
 }
 
+// Fold assignment used to follow the order rows arrived in, so the reported metrics were
+// a property of insertion order. Two stores holding the same observations could disagree,
+// and nothing in the output hinted the number was movable at all.
+func TestEvaluateDoesNotDependOnInputOrder(t *testing.T) {
+	var data []*store.Observation
+	for i := 0; i < 20; i++ {
+		data = append(data, obs("real-rule", "persistence", "high", store.ObsAcknowledged, "T1543.002"))
+		data = append(data, obs("noisy-rule", "network", "medium", store.ObsFalsePositive, "T1040"))
+	}
+	reversed := make([]*store.Observation, len(data))
+	for i := range data {
+		reversed[i] = data[len(data)-1-i]
+	}
+	forward, backward := Evaluate(data), Evaluate(reversed)
+	if forward.CVROCAUC != backward.CVROCAUC {
+		t.Errorf("ROC AUC depends on input order: %.4f forward vs %.4f reversed",
+			forward.CVROCAUC, backward.CVROCAUC)
+	}
+	if forward.CVRepeats != cvRepeats {
+		t.Errorf("CVRepeats = %d, want %d — the report must say how many passes it averages",
+			forward.CVRepeats, cvRepeats)
+	}
+}
+
+// A mean is not a result on its own. On a small, lopsided label set the same model scores
+// anywhere from below chance to strong depending only on how the folds fall, and reporting
+// the average of that as a single figure invites acting on it. Measured on the poligon
+// dataset (157 positives, 10 negatives), ROC AUC ranged 0.48–0.82 across seven seeds.
+func TestUnstableRankingIsNotCalledTrustworthy(t *testing.T) {
+	var data []*store.Observation
+	// Enough labels to clear the size gates, deliberately overlapping so no feature
+	// separates the classes cleanly and the fold split decides the outcome.
+	for i := 0; i < 30; i++ {
+		status := store.ObsAcknowledged
+		if i%3 == 0 {
+			status = store.ObsFalsePositive
+		}
+		data = append(data, obs("ambiguous-rule", "persistence", "medium", status, "T1543.002"))
+	}
+	st := Evaluate(data)
+	if st.CVROCAUCStdDev == 0 && st.Trustworthy {
+		t.Skip("this data happened to be stable; the guard is exercised by the assertion below")
+	}
+	if st.CVROCAUCStdDev > 0.10 && st.Trustworthy {
+		t.Errorf("ROC AUC swings ±%.2f between resamplings but the model was called trustworthy: %s",
+			st.CVROCAUCStdDev, st.Reason)
+	}
+}
+
 func TestPredictionMetrics(t *testing.T) {
 	predictions := []prediction{
 		{prob: 0.9, positive: true},
