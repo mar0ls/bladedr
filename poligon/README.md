@@ -32,6 +32,26 @@ denies bind-mounting over `/proc/<pid>`, so it MISSes on a hardened RHEL box (th
 emulation is blocked, not the detection). Regenerate the full set with a container
 run (overwrites) followed by a `--target … --append` run for the privileged ones.
 
+Run them on both a RHEL-family and a Debian-family host, because two of the five
+legitimately disagree between the two — and only seeing both tells you the difference is
+correct rather than a broken rule. Measured on Rocky Linux 10.2 (SELinux enforcing) and
+Ubuntu 24.04:
+
+| technique | Rocky 10.2 | Ubuntu 24.04 |
+|---|---|---|
+| `immutable-file` | ok | ok |
+| `binfmt-register` | ok | ok |
+| `core-pattern` | ok | ok |
+| `proc-bind-mount` | MISS | ok |
+| `yama-runtime` | MISS | ok |
+
+Both Rocky MISSes are the intended behaviour. SELinux blocks the `proc-bind-mount` plant,
+so there is nothing to detect. And `yama-runtime` sets `ptrace_scope=0`, which *is*
+RHEL's vendor default — the collector deliberately suppresses a runtime value matching the
+vendor default, because flagging it there is noise. Debian and Ubuntu ship `1`, so the
+same plant is a genuine weakening and the rule fires. A single-distro run would either
+never exercise that path or report a permanent false MISS.
+
 ## How it works
 
 For each technique in `manifest.yaml`, the orchestrator (`cmd/bladedr-lab`):
