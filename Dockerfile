@@ -10,12 +10,17 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 go build -o /out/bladedr-server ./cmd/bladedr-server && \
-    CGO_ENABLED=0 go build -o /out/bladectl ./cmd/bladectl && \
-    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /out/bladedr-probe.linux-amd64 ./cmd/bladedr-probe && \
-    CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o /out/bladedr-probe.linux-arm64 ./cmd/bladedr-probe && \
-    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /out/bladedr-sensor.linux-amd64 ./cmd/bladedr-sensor && \
-    CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o /out/bladedr-sensor.linux-arm64 ./cmd/bladedr-sensor
+# Stamped by the release workflow with the tag being built. Without it a published image
+# reports "dev" in its startup log and from bladectl version, so an operator has no way
+# to tell from a running container which release it is — the first question asked when a
+# CVE lands. Defaults to dev for local builds, which is honest: they are not a release.
+ARG VERSION=dev
+RUN CGO_ENABLED=0 go build -ldflags "-X main.version=${VERSION}" -o /out/bladedr-server ./cmd/bladedr-server && \
+    CGO_ENABLED=0 go build -ldflags "-X main.version=${VERSION}" -o /out/bladectl ./cmd/bladectl && \
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-X main.version=${VERSION}" -o /out/bladedr-probe.linux-amd64 ./cmd/bladedr-probe && \
+    CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags "-X main.version=${VERSION}" -o /out/bladedr-probe.linux-arm64 ./cmd/bladedr-probe && \
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-X main.version=${VERSION}" -o /out/bladedr-sensor.linux-amd64 ./cmd/bladedr-sensor && \
+    CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags "-X main.version=${VERSION}" -o /out/bladedr-sensor.linux-arm64 ./cmd/bladedr-sensor
 
 FROM alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
 RUN adduser -D -u 10001 bladedr && mkdir -p /etc/bladedr/policies && chown -R bladedr:bladedr /etc/bladedr
