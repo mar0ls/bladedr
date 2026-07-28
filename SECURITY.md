@@ -90,11 +90,20 @@ fetches: that asset can be replaced without the pinned SHA changing.
 
 The agent runs in every job, including the two that matter — `release`, which holds
 `contents: write`, and `image`, which holds the Docker Hub token. So whoever controls that
-release channel can influence what ships as `mar0ls/bladedr`. This is a first-party
-dependency, and the fix belongs upstream: publish checksums with the release and verify
-them before extracting.
+release channel can influence what ships as `mar0ls/bladedr`.
 
-Until that lands, treat it as a documented trust boundary. Reports of a *different* way
+It is a third-party dependency: `cicd-sensor` is an organisation this project has no
+control over and no write access to. That is the material point. The release it downloads
+from does publish `checksums.txt` and a Sigstore bundle for it, so verification is
+possible today and simply is not performed — but the decision to verify is not ours to
+make, and neither is the release channel.
+
+The reduction available here is scope. A CI observability agent does not need to be in the
+jobs that hold publishing credentials, and removing it from `release` and `image` would
+cut the blast radius to the jobs that hold none. That is a change to this repository, not
+a request to somebody else.
+
+Until either lands, treat it as a documented trust boundary. Reports of a *different* way
 into the release path — an unpinned action, a workflow that runs untrusted input with
 write permissions, a way to publish under a tag that never passed the gates — are in
 scope.
