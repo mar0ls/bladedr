@@ -98,23 +98,11 @@ const probeCacheDir = "/tmp/.bladedr"
 // check. ls -ld doesn't dereference, which is what catches a symlink parked at the
 // cache path; -n prints uids numerically because the owner may not resolve to a name.
 //
-// The ten mode characters are matched with one optional suffix rather than compared
-// literally, because ls appends '.' for an SELinux context and '+' for an ACL. On
-// anything RHEL-derived `drwx------.` is simply what a correct directory looks like, and
-// a literal comparison against "drwx------" refuses every host in that family.
-//
-// Only the suffix is tolerated, never the mode itself. That distinction matters more
-// than it looks: an ACL that actually grants another user access shows up as a changed
-// group field (ls prints the ACL mask there, e.g. `drwxr-----+`), so it fails the check
-// on its mode and is refused — which is right, since the directory is no longer private.
-// A default or empty ACL leaves the access mode alone, reads as `drwx------+`, and
-// passes.
-//
-// Checked on the real thing rather than inferred: Rocky Linux 10.2, SELinux Enforcing,
-// coreutils 9.5, where the staging directory reads `drwx------.` (context
-// unconfined_u:object_r:user_tmp_t:s0). The literal comparison this replaced refuses
-// that, which grounded every scan on the whole RHEL family. Permissive modes are still
-// rejected there with the suffix present.
+// The mode is matched with one optional suffix, not compared literally: ls appends '.'
+// for an SELinux context and '+' for an ACL, so `drwx------.` is what a correct directory
+// looks like on Rocky 10.2 (verified) and a literal comparison locks out the whole RHEL
+// family. Only the suffix is tolerated — an ACL that grants real access shows up as a
+// changed group field (the ACL mask, e.g. `drwxr-----+`) and is refused on its mode.
 func cacheDirScript(dir string) string {
 	d := shellArg(dir)
 	return `set -u

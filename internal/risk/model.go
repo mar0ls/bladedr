@@ -375,13 +375,10 @@ func Evaluate(obs []*store.Observation) Stats {
 	return st
 }
 
-// crossValidate runs one stratified k-fold pass. seed shuffles the order in which rows
-// are dealt into folds; pass different seeds to get independent estimates.
-//
-// Without the shuffle, folds were assigned in the order rows came back from the store,
-// so the reported metrics were a property of insertion order rather than of the data —
-// two deployments holding identical observations could report different numbers, and
-// nothing revealed that the number moved at all.
+// crossValidate runs one stratified k-fold pass. seed shuffles the order rows are dealt
+// into folds; pass different seeds for independent estimates. Without it folds followed
+// the order rows came back from the store, making the metrics a property of insertion
+// order — two deployments with identical observations could disagree.
 // cvRepeats is how many independent seeded passes Evaluate averages. The methodology
 // this borrows from (a streaming-NIDS label-efficiency study of ours) found single-split
 // evaluation flips rankings between seeds, and used >= 6 seeds so a paired Wilcoxon test
