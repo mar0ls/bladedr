@@ -88,16 +88,23 @@ with `curl` and unpacks it with `tar` — no checksum, no signature. Pinning the
 SHA pins its *code*, and the agent version with it, but not the release asset that code
 fetches: that asset can be replaced without the pinned SHA changing.
 
-The agent runs in every job, including the two that matter — `release`, which holds
-`contents: write`, and `image`, which holds the Docker Hub token. So whoever controls that
-release channel can influence what ships as `mar0ls/bladedr`. This is a first-party
-dependency, and the fix belongs upstream: publish checksums with the release and verify
-them before extracting.
+It is a third-party dependency: `cicd-sensor` is an organisation this project has no
+control over and no write access to. The release it downloads from does publish
+`checksums.txt` and a Sigstore bundle for it, so verification is possible today and simply
+is not performed — but neither that decision nor the release channel is ours, so asking
+for a fix is not a mitigation this project controls.
 
-Until that lands, treat it as a documented trust boundary. Reports of a *different* way
-into the release path — an unpinned action, a workflow that runs untrusted input with
-write permissions, a way to publish under a tag that never passed the gates — are in
-scope.
+What this project controls is where the agent runs, so it no longer runs in the two jobs
+that can publish on your behalf: `release`, which holds `contents: write`, and `image`,
+which holds the Docker Hub token. It still runs in `build`, `semgrep`, `smoke` and
+`detections`, where a compromise costs a false CI report rather than a substituted
+artifact. This is not a claim that the action is hostile — there is no evidence of that.
+It is the ordinary rule that a job able to ship something to users should carry as little
+unverified code as it can.
+
+Reports of a *different* way into the release path — an unpinned action, a workflow that
+runs untrusted input with write permissions, a way to publish under a tag that never
+passed the gates — are in scope.
 
 ## Not in scope
 
