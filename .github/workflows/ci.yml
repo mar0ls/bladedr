@@ -127,7 +127,13 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: cicd-sensor/cicd-sensor-action@2b76335ff1c2dd298e983961f7a200d3fe9076c2 # v0.0.36
+      # cicd-sensor is deliberately absent from this job. It is a third-party agent that
+      # downloads its binary from a GitHub release without verifying a checksum or
+      # signature, and this job holds credentials that can publish on your behalf. There
+      # is no evidence the action is hostile; the point is that a job which can ship an
+      # artifact to users should carry as little unverified code as possible. It still
+      # runs in build, semgrep, smoke and detections, where a compromise costs a false CI
+      # report rather than a substituted release.
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
@@ -180,7 +186,13 @@ jobs:
     needs: [build, semgrep, smoke, detections]
     runs-on: ubuntu-latest
     steps:
-      - uses: cicd-sensor/cicd-sensor-action@2b76335ff1c2dd298e983961f7a200d3fe9076c2 # v0.0.36
+      # cicd-sensor is deliberately absent from this job. It is a third-party agent that
+      # downloads its binary from a GitHub release without verifying a checksum or
+      # signature, and this job holds credentials that can publish on your behalf. There
+      # is no evidence the action is hostile; the point is that a job which can ship an
+      # artifact to users should carry as little unverified code as possible. It still
+      # runs in build, semgrep, smoke and detections, where a compromise costs a false CI
+      # report rather than a substituted release.
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       # arm64 is emulated here. It only builds Go binaries, so the cost is tolerable;
       # if it ever gets slow, split it onto a native arm64 runner instead of dropping
