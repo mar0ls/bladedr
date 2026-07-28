@@ -127,18 +127,44 @@ func (r *Runner) responseCommand(host *store.Host, action *store.ResponseAction)
 		if action.DryRun {
 			return fmt.Sprintf("printf 'dry-run: would isolate host; allow SSH tcp/%d and control plane %s:%d\\n'; nft list table inet bladedr_response 2>/dev/null || true", sshPort, ip, port), nil
 		}
+		// One transaction, via `nft -f`. Built statement by statement, the drop policy
+		// lands before the accept rules and the very SSH session carrying these commands
+		// is cut mid-script: the shell dies, the remaining rules never run, and the host
+		// is left filtering everything with nothing allowed. That is not a race, it is
+		// what happens every time the transport being filtered is the transport running
+		// the commands. Loading the whole ruleset at once makes the policy and its
+		// exceptions take effect together, so an established connection is never dropped.
+		// Stateless port rules in both directions, not just conntrack. A connection that
+		// existed before this table did is not in the conntrack table — verified on a
+		// Rocky host, zero entries for the live SSH session — so "ct state established"
+		// matches nothing for it. Inbound packets passed on dport, the replies had no
+		// matching rule, and the session hung on the output policy. Which is to say the
+		// firewall cut the transport it was being installed over, atomically or not.
+		ruleset := fmt.Sprintf(`table inet bladedr_response {
+  chain input {
+    type filter hook input priority -200; policy drop;
+    iif lo accept
+    ct state established,related accept
+    tcp dport %[1]d accept
+    %[2]s saddr %[3]s tcp sport %[4]d accept
+  }
+  chain output {
+    type filter hook output priority -200; policy drop;
+    oif lo accept
+    ct state established,related accept
+    tcp sport %[1]d accept
+    %[2]s daddr %[3]s tcp dport %[4]d accept
+  }
+}`, sshPort, family, ip, port)
 		commands := []string{
 			"command -v nft >/dev/null || { echo 'nft is required' >&2; exit 1; }",
+			// Removing the old table only ever loosens filtering, so it cannot strand
+			// the host even though it is a separate transaction from the load below.
 			"nft delete table inet bladedr_response 2>/dev/null || true",
-			"nft add table inet bladedr_response",
-			`nft 'add chain inet bladedr_response input { type filter hook input priority -200; policy drop; }'`,
-			`nft 'add chain inet bladedr_response output { type filter hook output priority -200; policy drop; }'`,
-			"nft add rule inet bladedr_response input iif lo accept",
-			"nft add rule inet bladedr_response input ct state established,related accept",
-			fmt.Sprintf("nft add rule inet bladedr_response input tcp dport %d accept", sshPort),
-			"nft add rule inet bladedr_response output oif lo accept",
-			"nft add rule inet bladedr_response output ct state established,related accept",
-			fmt.Sprintf("nft add rule inet bladedr_response output %s daddr %s tcp dport %d accept", family, ip, port),
+			// Piped rather than a heredoc: these statements get joined with ";" and the
+			// whole thing is re-quoted for sudo, and a heredoc terminator stops working
+			// the moment anything follows it on its line.
+			"printf '%s\\n' " + shellArg(ruleset) + " | nft -f -",
 			"nft list table inet bladedr_response",
 		}
 		return strings.Join(commands, "; "), nil
