@@ -45,7 +45,7 @@ misreading:
 |---|---|
 | `bladedr-sensor` + Tetragon integration | Depends on an external policy engine and a BTF-capable kernel, and **you supply the TracingPolicies** — no bundle ships with bladedr yet, so the tier is off out of the box. A written and kernel-tested set is planned for a later release. The event→observation mapping is still settling |
 | Server-push sensor deployment | Touches systemd and Docker on the target; too many host variations to call settled |
-| **Response actions** | Landed in 0.9.0 and run root commands on production hosts. Unit- and API-tested, but not yet proven on a real fleet — `isolate_host` in particular can strand a host if the control-plane endpoint is wrong |
+| **Response actions** | Run root commands on monitored hosts. All four playbooks are now exercised end to end on Rocky Linux 10.2 and Ubuntu 24.04 — request, second-admin approval, execution, and for `isolate_host` a verified `restore_network` afterwards. That run found two faults that unit tests could not: sudo split every compound playbook so the guards never executed, and `isolate_host` reliably cut the SSH session it was installed over. Both fixed and covered by tests that execute the command rather than inspect it. Two lab hosts are still not a fleet, so this stays Beta until it has run somewhere with real traffic and hosts nobody can afford to strand |
 | `bladectl` | Flag names may change while the ergonomics settle |
 
 **Experimental** — usable, no compatibility promise, may be removed.

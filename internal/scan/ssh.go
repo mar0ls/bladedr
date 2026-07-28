@@ -353,7 +353,7 @@ fi
 pkill -f '[/]opt/bladedr/sensor' 2>/dev/null || true
 pkill -f '[/]tmp/.bladedr/sensor' 2>/dev/null || true
 echo "left=$(docker ps -q -f name=bladedr-tetragon | wc -l)"`
-	cmd := wrapSudo(sudoPW, "sh -c "+shellArg(stop))
+	cmd := wrapSudo(sudoPW, stop)
 	out, err := run(client, cmd, nil)
 	if err != nil {
 		return fmt.Errorf("stop sensor: %w (%s)", err, bytes.TrimSpace(out))
@@ -370,7 +370,13 @@ func wrapSudo(pw, cmd string) string {
 	if pw == "" {
 		return cmd
 	}
-	return "printf '%s\\n' " + shellArg(pw) + " | sudo -S " + cmd
+	// sh -c, and cmd as a single quoted argument. Without it the remote shell splits a
+	// compound command on the first ";" and hands sudo only the fragment before it: the
+	// rest then runs unprivileged, and any variable the first fragment set is gone. That
+	// is not a theoretical parse — kill_process built "pid=1234; if [ ... ]" and sudo
+	// took "pid=1234" as an environment assignment, so the guard compared an empty pid
+	// and refused every kill on a password-sudo host.
+	return "printf '%s\\n' " + shellArg(pw) + " | sudo -S sh -c " + shellArg(cmd)
 }
 
 // shellArg single-quotes a string for safe use in a remote shell command.
