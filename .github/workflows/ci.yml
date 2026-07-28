@@ -101,6 +101,12 @@ jobs:
           GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o bin/bladedr-probe.linux-amd64 ./cmd/bladedr-probe
           GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -o bin/bladedr-probe.linux-arm64 ./cmd/bladedr-probe
           go run ./cmd/bladedr-lab --fail-on-miss --expect-techniques 72
+      # The other half: a rule that fires on an untouched system is noise on every host in
+      # the fleet, and technique coverage says nothing about it. Runs the same probe and
+      # rules against stock Debian, Ubuntu, Rocky and Alpine and requires silence, which
+      # also makes it the distro matrix — a rule can be right on Debian and wrong on RHEL.
+      - name: false-positive baseline on stock images
+        run: ./scripts/baseline.sh
 
   smoke:
     runs-on: ubuntu-latest
