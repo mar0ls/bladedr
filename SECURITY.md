@@ -66,6 +66,39 @@ without following symlinks, and a cached binary is verified by SHA-256 before it
 Anything unverifiable gets re-uploaded rather than trusted. If you find a way for an
 unprivileged local account to influence which binary a scan executes, that's in scope.
 
+## Build and release
+
+The published image is the thing operators run with SSH access to their fleet, so what
+can reach the release pipeline matters as much as what can reach a host.
+
+Most of that chain is nailed down. All 24 GitHub Action references are pinned by commit
+SHA, both Dockerfile base images are pinned by digest, and release images carry build
+provenance and an SBOM. Nothing publishes until the tagged commit passes the store
+contract against Postgres, the attack-emulation range and the false-positive baseline —
+the release and image jobs depend on those gates rather than running beside them.
+
+What that does *not* give you is review. A tag is accepted on the strength of its name
+alone (`refs/tags/v*`), so anyone who can push a tag can publish any commit that passes
+the gates, whether or not it ever went through a pull request. Branch and tag protection
+is the place to fix that, not the workflow.
+
+One gap is open and worth stating plainly rather than leaving for someone to find. CI runs
+`cicd-sensor/cicd-sensor-action`, which downloads its agent binary from a GitHub release
+with `curl` and unpacks it with `tar` — no checksum, no signature. Pinning the action by
+SHA pins its *code*, and the agent version with it, but not the release asset that code
+fetches: that asset can be replaced without the pinned SHA changing.
+
+The agent runs in every job, including the two that matter — `release`, which holds
+`contents: write`, and `image`, which holds the Docker Hub token. So whoever controls that
+release channel can influence what ships as `mar0ls/bladedr`. This is a first-party
+dependency, and the fix belongs upstream: publish checksums with the release and verify
+them before extracting.
+
+Until that lands, treat it as a documented trust boundary. Reports of a *different* way
+into the release path — an unpinned action, a workflow that runs untrusted input with
+write permissions, a way to publish under a tag that never passed the gates — are in
+scope.
+
 ## Not in scope
 
 - Anything requiring an already-compromised control-plane host, or `BLADEDR_NODE_KEY`.

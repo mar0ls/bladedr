@@ -13,6 +13,10 @@ package risk
 
 import (
 	"math"
+	// math/rand (not crypto/rand) is intentional: the fold shuffle has to be reproducible
+	// from a seed, so the same observations always produce the same report. This is
+	// evaluation resampling, not security or token material.
+	// nosemgrep: go.lang.security.audit.crypto.math_random.math-random-used
 	"math/rand"
 	"sort"
 	"strconv"
