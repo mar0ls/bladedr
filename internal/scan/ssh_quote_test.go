@@ -1,7 +1,10 @@
 package scan
 
 import (
+	"os"
 	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -47,8 +50,8 @@ func TestWrapSudoNoPassword(t *testing.T) {
 
 func TestWrapSudoPipesQuotedPassword(t *testing.T) {
 	got := wrapSudo("p@ss'word", "id")
-	if !strings.Contains(got, "sudo -S id") {
-		t.Fatalf("wrapSudo should invoke sudo -S: %q", got)
+	if !strings.Contains(got, "sudo -S sh -c") {
+		t.Fatalf("wrapSudo should run the command under sh -c: %q", got)
 	}
 	if !strings.HasPrefix(got, "printf ") {
 		t.Fatalf("wrapSudo should feed the password via printf: %q", got)
@@ -59,5 +62,35 @@ func TestWrapSudoPipesQuotedPassword(t *testing.T) {
 	}
 	if !strings.Contains(got, shellArg("p@ss'word")) {
 		t.Fatalf("password should be passed through shellArg: %q", got)
+	}
+}
+
+// The string-shape assertions above would have passed throughout the period when
+// wrapSudo was broken: they check what the command looks like, never what a shell does
+// with it. Run the wrapped command through /bin/sh with a stub sudo and assert the whole
+// compound statement reaches it — a variable set in the first fragment has to survive to
+// the last, which is exactly what failed on a real password-sudo host.
+func TestWrapSudoKeepsCompoundCommandsIntact(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell")
+	}
+	dir := t.TempDir()
+	// Stub sudo: drop the -S flag and exec the rest, so "sudo -S sh -c '…'" behaves like
+	// a real sudo would without needing one.
+	if err := os.WriteFile(filepath.Join(dir, "sudo"),
+		[]byte("#!/bin/sh\n[ \"$1\" = \"-S\" ] && shift\ncat >/dev/null\nexec \"$@\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// The shape kill_process builds: an assignment, then statements that depend on it.
+	cmd := `pid=4242; printf 'saw pid=%s\n' "$pid"; [ -n "$pid" ] || exit 1`
+	sh := exec.Command("/bin/sh", "-c", wrapSudo("secret", cmd))
+	sh.Env = append(os.Environ(), "PATH="+dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	out, err := sh.CombinedOutput()
+	if err != nil {
+		t.Fatalf("wrapped command failed: %v (%s)", err, out)
+	}
+	if got := strings.TrimSpace(string(out)); got != "saw pid=4242" {
+		t.Errorf("compound command was split before sudo saw it: %q", got)
 	}
 }
