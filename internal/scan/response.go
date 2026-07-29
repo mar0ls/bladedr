@@ -127,13 +127,10 @@ func (r *Runner) responseCommand(host *store.Host, action *store.ResponseAction)
 		if action.DryRun {
 			return fmt.Sprintf("printf 'dry-run: would isolate host; allow SSH tcp/%d and control plane %s:%d\\n'; nft list table inet bladedr_response 2>/dev/null || true", sshPort, ip, port), nil
 		}
-		// One transaction, via `nft -f`. Built statement by statement, the drop policy
-		// lands before the accept rules and the very SSH session carrying these commands
-		// is cut mid-script: the shell dies, the remaining rules never run, and the host
-		// is left filtering everything with nothing allowed. That is not a race, it is
-		// what happens every time the transport being filtered is the transport running
-		// the commands. Loading the whole ruleset at once makes the policy and its
-		// exceptions take effect together, so an established connection is never dropped.
+		// One transaction, via `nft -f`. Applied statement by statement, the drop policy
+		// lands before any accept rule and kills the SSH session carrying the commands —
+		// the rest never runs and the host is left filtering everything. Loading the whole
+		// ruleset at once makes the policy and its exceptions take effect together.
 		// Stateless port rules in both directions, not just conntrack. A connection that
 		// existed before this table did is not in the conntrack table — verified on a
 		// Rocky host, zero entries for the live SSH session — so "ct state established"
