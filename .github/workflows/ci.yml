@@ -213,8 +213,10 @@ jobs:
           # its own tag but must not move latest.
           tags: |
             type=semver,pattern={{version}}
+            # No bare-major tag while this is 0.x. A floating `0` reads as "any 0.x is
+            # interchangeable", which is the one thing semver says about 0.x that is not
+            # true. Add {{major}} when 1.0 ships and the promise exists.
             type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
           flavor: latest=${{ !contains(github.ref_name, '-') }}
       - uses: docker/build-push-action@471d1dc4e07e5cdedd4c2171150001c434f0b7a4 # v6
         with:
