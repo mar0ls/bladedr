@@ -3,6 +3,43 @@
 Notable changes. Format loosely follows [Keep a Changelog](https://keepachangelog.com);
 versions follow [SemVer](https://semver.org).
 
+## [0.9.1] - 2026-07-29
+
+Response actions did not work on any host where sudo asks for a password, which is most
+of them. Upgrade if you use them.
+
+### Fixed
+- Every response playbook failed on a password-sudo host. The command was pasted straight
+  after `sudo -S`, so the remote shell split it on the first `;` and sudo received only
+  the fragment before it; the rest ran unprivileged with its variables unset. The failure
+  surfaced as `executable mismatch; refusing` — a guard message from a guard that never
+  ran, which is the worst way for a safety check to fail.
+- `isolate_host` cut the SSH session it was installed over, every time, leaving the host
+  filtering everything with nothing allowed and the action stuck reporting `running`. Two
+  causes: rules were applied one at a time so the drop policy landed before any accept
+  rule, and `ct state established` never matched a connection that predated the table.
+  The ruleset now loads in a single `nft -f` transaction and carries stateless port rules
+  in both directions.
+- `/risk/stats` reported a figure that depended on the order rows came back from the
+  database. It now averages seven seeded cross-validation passes and publishes the spread;
+  a ROC AUC standard deviation above 0.10 marks the result untrustworthy whatever the
+  mean. On the poligon dataset that figure ranged 0.48 to 0.82 across seeds.
+- GitHub releases and Docker Hub disagreed about what a prerelease is: `v*-rc*` tags
+  published as normal releases on one and prereleases on the other.
+
+### Added
+- CI gates the detections themselves: the attack-emulation range must fire every expected
+  rule, and no rule may fire on a stock Debian, Ubuntu, Rocky or Alpine image. Releases
+  depend on both.
+- `SECURITY.md` documents the build and release trust boundary, including a third-party
+  CI agent that fetches an unverified binary. That agent no longer runs in the jobs
+  holding publishing credentials.
+
+### Verified
+All four response playbooks now run end to end on Rocky Linux 10.2 and Ubuntu 24.04 —
+request, second-admin approval, execution, and a verified `restore_network` after
+`isolate_host`. They remain Beta: two lab hosts are not a fleet.
+
 ## [0.9.0] - 2026-07-27
 
 ### Added
