@@ -27,7 +27,7 @@ import (
 func Augment(labeled []*store.Observation, seed int64) []*store.Observation {
 	var pos, neg []*store.Observation
 	for _, o := range labeled {
-		switch LabelOf(o.Status) {
+		switch LabelOf(o.Verdict) {
 		case Positive:
 			pos = append(pos, o)
 		case Negative:

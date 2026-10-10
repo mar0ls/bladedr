@@ -16,7 +16,7 @@ func TestFeaturesStructuralClasses(t *testing.T) {
 	for _, f := range Features(o) {
 		feats[f] = true
 	}
-	for _, want := range []string{"rule:systemd-suspicious-execstart", "path:tmp", "uid:root", "parent:web", "tac:T1543"} {
+	for _, want := range []string{"rule:systemd-suspicious-execstart", "path:tmp", "uid:root", "parent:web", "src:ebpf_sensor"} {
 		if !feats[want] {
 			t.Errorf("missing feature %q in %v", want, feats)
 		}
@@ -43,7 +43,7 @@ func TestAugmentBalancesMinority(t *testing.T) {
 	aug := Augment(data, 42)
 	pos, neg := 0, 0
 	for _, o := range aug {
-		switch LabelOf(o.Status) {
+		switch LabelOf(o.Verdict) {
 		case Positive:
 			pos++
 		case Negative:

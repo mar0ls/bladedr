@@ -2,19 +2,28 @@ package risk
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 
 	"bladedr/internal/store"
 )
 
 func obs(rule, cat, sev, status string, mitre ...string) *store.Observation {
-	return &store.Observation{RuleID: rule, Category: cat, Severity: sev, Source: store.SourceAgentlessProbe, Mitre: mitre, Status: status, Score: 50}
+	verdict := "unknown"
+	if status == store.ObsAcknowledged {
+		verdict = "true_positive"
+	}
+	if status == store.ObsFalsePositive {
+		verdict = "false_positive"
+	}
+	return &store.Observation{RuleID: rule, Category: cat, Severity: sev, Source: store.SourceAgentlessProbe, Mitre: mitre, Status: status, Verdict: verdict, Score: 50}
 }
 
 func TestLabelOf(t *testing.T) {
 	cases := map[string]Label{
 		store.ObsFalsePositive: Negative,
-		store.ObsAcknowledged:  Positive,
+		store.ObsAcknowledged:  Unlabeled,
+		"true_positive":        Positive,
 		store.ObsResolved:      Unlabeled, // ambiguous (remediated-real vs benign-reviewed) -> excluded
 		store.ObsOpen:          Unlabeled,
 		"":                     Unlabeled,
@@ -29,20 +38,43 @@ func TestLabelOf(t *testing.T) {
 func TestFeaturesStructuralOnly(t *testing.T) {
 	o := obs("systemd-timer-suspicious", "persistence", "high", store.ObsAcknowledged, "T1053.006", "T1053.006")
 	feats := map[string]bool{}
-	techniqueCount := 0
 	for _, f := range Features(o) {
-		feats[f] = true
-		if f == "tech:T1053.006" {
-			techniqueCount++
+		if feats[f] {
+			t.Errorf("feature %q emitted twice", f)
 		}
+		feats[f] = true
 	}
-	for _, want := range []string{"rule:systemd-timer-suspicious", "cat:persistence", "sev:high", "src:agentless_probe", "tech:T1053.006", "tac:T1053"} {
+	for _, want := range []string{"rule:systemd-timer-suspicious", "src:agentless_probe"} {
 		if !feats[want] {
 			t.Errorf("missing feature %q in %v", want, feats)
 		}
 	}
-	if techniqueCount != 1 {
-		t.Fatalf("duplicate MITRE values produced %d identical features, want 1", techniqueCount)
+	// Category, severity and MITRE are fixed by the rule. Emitting them as well counts
+	// the rule several times over in a model that treats tokens as independent.
+	for f := range feats {
+		for _, p := range []string{"cat:", "sev:", "tech:", "tac:"} {
+			if strings.HasPrefix(f, p) {
+				t.Errorf("rule-derived feature %q duplicates rule identity", f)
+			}
+		}
+	}
+}
+
+func TestPriorIsUniform(t *testing.T) {
+	// A lopsided labelled set (here 10:2, like the lab's attack-heavy manifest) must not
+	// become a base rate: a finding the model has no evidence about sits at 50.
+	var data []*store.Observation
+	for i := 0; i < 10; i++ {
+		data = append(data, obs("planted", "persistence", "high", store.ObsAcknowledged))
+	}
+	for i := 0; i < 2; i++ {
+		data = append(data, obs("benign", "persistence", "high", store.ObsFalsePositive))
+	}
+	m := Train(data)
+	unseen := obs("never-labelled", "network", "low", store.ObsOpen)
+	unseen.Source = "baseline"
+	if r := m.Score(unseen); r.Priority != 50 {
+		t.Errorf("finding with no learned evidence scored %d, want 50 (top: %+v)", r.Priority, r.Top)
 	}
 }
 
@@ -127,9 +159,39 @@ func TestEvaluateReportsInsufficientData(t *testing.T) {
 	}
 }
 
+// Range data is roughly three quarters positive; a fleet is the other way round. A model
+// fitted only on range rows can look perfectly separated and still be calibrated to a
+// world that does not exist, so no amount of separation earns trust on its own.
+func TestLabOnlyLabelsAreNeverTrustworthy(t *testing.T) {
+	var data []*store.Observation
+	for i := 0; i < minPerClass; i++ {
+		real := obs("real-rule", "persistence", "high", store.ObsAcknowledged, "T1543.002")
+		noise := obs("noisy-rule", "network", "medium", store.ObsFalsePositive, "T1040")
+		real.Source, noise.Source = sourceLab, sourceLab
+		data = append(data, real, noise)
+	}
+	st := Evaluate(data)
+	if st.CVROCAUC != 1 {
+		t.Fatalf("this set is perfectly separable; the point is that separability is not enough (auc %.3f)", st.CVROCAUC)
+	}
+	if st.Trustworthy {
+		t.Errorf("labels sourced entirely from the range must not be trustworthy: %+v", st)
+	}
+
+	// One real triaged observation is not enough to make it trustworthy either, but it
+	// must change which gate answers: the complaint is no longer about provenance.
+	mixed := append([]*store.Observation{}, data...)
+	mixed = append(mixed, obs("real-rule", "persistence", "high", store.ObsAcknowledged, "T1543.002"))
+	if got := Evaluate(mixed); strings.Contains(got.Reason, "attack range") {
+		t.Errorf("with a non-lab label present the provenance gate should no longer fire: %q", got.Reason)
+	}
+}
+
 func TestEvaluateTrustworthyOnSeparableData(t *testing.T) {
 	var data []*store.Observation
-	for i := 0; i < 20; i++ {
+	// Sized off the gate itself, so raising the floor moves this test with it rather
+	// than turning perfectly separable data into a failure.
+	for i := 0; i < minPerClass; i++ {
 		data = append(data, obs("real-rule", "persistence", "high", store.ObsAcknowledged, "T1543.002"))
 		data = append(data, obs("noisy-rule", "network", "medium", store.ObsFalsePositive, "T1040"))
 	}
