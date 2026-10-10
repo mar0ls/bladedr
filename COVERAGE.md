@@ -31,6 +31,9 @@ under *Execution, Defense Evasion (runtime), C2, Credential Access, Discovery* i
 | `masquerade-kernel-thread` | userland posing as [kworker] | T1036.004 | T6038, T6171, T6140 |
 | `hidden-process` | reachable via /proc/PID, hidden from readdir | T1014 | T6046, T6253 |
 | `process-empty-environ` | exe-backed process with wiped /proc/PID/environ | T1070.004 | T6325 (BPFDoor) |
+| `process-library-from-writable-path` | executable library mapping from /tmp, /var/tmp, /dev/shm (read from /proc/PID/maps) | T1574.006/T1055 | T6046 |
+| `process-library-deleted` | library still mapped after its file was deleted, outside /usr, /lib, /opt, /var/lib | T1574.006/T1070.004 | T6046 |
+| `process-ld-preload-env` | LD_PRELOAD/LD_AUDIT in a running process's environment naming a non-system library | T1574.006 | T6046, T6235 |
 | `packet-sniffer-process` | process holds an AF_PACKET raw socket | T1040 | T6325, T6012 |
 | `suspicious-port-listener` | listener on backdoor port | T1571 | T6123.* |
 | `ld-so-preload-rootkit` | entry in /etc/ld.so.preload | T1574.006 | T6046, T6235, T6327, T6422 |
@@ -39,6 +42,12 @@ under *Execution, Defense Evasion (runtime), C2, Credential Access, Discovery* i
 | `miner-c2-outbound-connection` | established conn to known miner-pool / C2 port | T1071/T1496 | T6252, T6126.* |
 | `ssh-tunnel-process` | live ssh client tunnel: -D SOCKS / -R / persistent -N -f | T1572/T1090 | T6033, T6189 |
 | `passwordless-account` | /etc/shadow entry with empty password | T1098/T1078 | credential |
+| `weak-password-hash-scheme` | login account whose hash is MD5-crypt or DES (needs root to read shadow) | T1110.002/T1003.008 | credential |
+| `unprotected-ssh-private-key` | SSH private key without a passphrase in `~/.ssh` or a loose `*.pem`/`*.key` in a home directory | T1552.004 | credential |
+| `fleet-shared-ssh-key` | the same SSH key authorized on more than one host | T1098.004/T1021.004 | fleet |
+| `fleet-shared-password-hash` | the same password hash on several hosts, or on several accounts of one host | T1078/T1110.002 | fleet |
+| `ssh-private-key-grants-access` | a private key stored on this host whose public half is authorized on other hosts (a usable path between machines) | T1552.004/T1021.004 | fleet |
+| `fleet-private-key-copied` | the same private key stored on more than one host | T1552.004 | fleet |
 | `service-account-in-privileged-group` | nologin account in sudo/wheel/docker/lxd | T1098 | privesc |
 | `at-job-cradle` | at(1) job with cradle/revshell | T1053.002 | T6179 |
 | `systemd-suspicious-execstart` | unit ExecStart from /tmp,/home,… | T1543.002 | T6015 |

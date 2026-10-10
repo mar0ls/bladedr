@@ -3,6 +3,112 @@
 Notable changes. Format loosely follows [Keep a Changelog](https://keepachangelog.com);
 versions follow [SemVer](https://semver.org).
 
+## [0.9.2] - 2026-10-10
+
+Adds detection of credential paths between hosts and of libraries loaded into running
+processes, tracks analyst verdicts separately from workflow status, and makes scans through
+sudo complete instead of partial. Back up the database before upgrading: this release adds
+migrations 0010–0012, which are forward-only, so a downgrade needs the backup. After
+upgrading, enter a sudo password on hosts whose account needs one (Hosts → edit); every host
+needs one scan before cross-host findings appear. Earlier status-based triage no longer
+counts as training data — assess findings with Confirm finding / Close as FP.
+
+### Added
+- Credential tracking across the fleet, for the paths an intruder uses to move between
+  machines. The probe now reads password-hash schemes from `/etc/shadow` and finds SSH
+  private keys under home directories; the server keeps a current per-host inventory and
+  reports a key authorized on several hosts (`fleet-shared-ssh-key`), a private key stored
+  on one host that opens others (`ssh-private-key-grants-access`), a private key copied
+  between hosts, and a password hash shared across hosts or accounts. Two host-level rules
+  join them: `weak-password-hash-scheme` and `unprotected-ssh-private-key`. Only
+  fingerprints leave a host — a SHA-256 of each key, a truncated SHA-256 of each hash —
+  never a key or a hash. Needs root for `/etc/shadow` and other users' homes; an
+  unprivileged scan reports that it could not read them. Password-hash and private-key
+  identifiers are kept out of the baseline, so a changed password is not drift. The probe
+  binary grows by about 2 MB (the SSH library used to read key files).
+- Three rules for libraries loaded into running processes, which the file-level checks
+  (ld.so.preload, units, profiles) cannot see: `process-library-from-writable-path`,
+  `process-library-deleted` and `process-ld-preload-env`. The probe reads
+  `/proc/PID/maps` and `/proc/PID/environ`; only executable mappings count, the process's
+  own binary and routine package-upgrade deletions are skipped, and a preload of a
+  distribution library (jemalloc, libgtk3-nocsd) is not reported. Unprivileged scans see
+  only their own account's processes and now say so.
+- Closed findings (false positive or resolved) reopen when they vanish and come back: the
+  host's previous completed scan did not see them and they were last seen at least 24 hours
+  ago (`BLADEDR_REOPEN_AFTER`, `off` to disable). A finding present on every scan stays
+  closed, and so does everything on a host that was merely unreachable for a while, since
+  the scan before the gap saw it. The verdict is kept, so the earlier assessment can be
+  confirmed or overturned.
+- A partial scan now records what the collectors could not read in the scan's `error`
+  field, instead of only saying it was partial.
+- Optional sudo password on a host's credential (add/edit host form and API
+  `sudo_password`), sealed with the node key like the SSH secret and never returned. A
+  key-authenticated account has no password to escalate with, so its scans stayed
+  `partial`; the stored sudo password is used by the scan and the sensor deploy, and
+  falls back to the login password of a password account when absent.
+- Isolated `bladedr-atomic` artifact capture for reviewed SetUID and cap_setuid
+  tests, with benign controls, exact-rule/path checks, cleanup checks and source
+  provenance. Captures remain separate from the deployed training dataset.
+
+### Fixed
+- `packet-sniffer-process` was keyed by PID, so every run of the same tool opened a new
+  alert (ten for one tcpdump habit). It is keyed by program; the PID stays in the evidence.
+- Scans finished `partial` for reasons that said nothing about the host. The BPF evidence
+  collector counted a process or fd that vanished between listing and reading as an
+  incomplete collection, which on a live system is routine, and treated a missing optional
+  `bpftool` as a failed scan on every host that has BPF programs. A vanished file is no
+  longer an error and a missing `bpftool` is reported on each program's evidence only; a
+  permission failure still makes the scan partial.
+- The probe cache on scanned hosts grew by about 16 MB per released version and was never
+  cleaned, contradicting "leaves nothing behind". Each scan now removes probe binaries of
+  other versions and leftover rule bundles older than an hour; the sensor staging files
+  that share the directory are not touched.
+- File-loaded ML examples cannot count as fleet labels by supplying a production
+  source name. Reviewed external imports require provenance and scenario grouping.
+- Findings now expose atomic disposition actions with English labels. Closing as
+  FP also writes the negative verdict; inconclusive closure excludes the finding
+  from training. Remediation closure requires a confirmed positive verdict.
+- ML supervision uses a separate explicit analyst verdict instead of workflow
+  status. Legacy false_positive requests now explicitly write a negative verdict;
+  legacy resolution requires a positive verdict, including bulk requests. The console
+  provides independent assessments, audited by the API; historical verdicts default
+  to unknown rather than being guessed from old status values.
+- Risk scores were dominated by where a finding came from, not what it was. The rule's
+  category, severity and MITRE tags were emitted as separate features on top of the
+  rule itself, so a rule counted five times in a model that treats features as
+  independent, and lab plants taught every finding sharing a tactic to score as an
+  attack (BPF baseline drift scored 80 because of kernel-module plants). Lab rows
+  also carried a `lab` source token that no real finding has, the class prior was
+  the lab's own 141:54 attack-heavy ratio, and running-process executables were
+  mixed into the same path class as tampered files. The model now uses the rule as
+  one feature, treats lab rows as probe findings, uses a flat prior (a finding with
+  no learned evidence scores 50), and separates executable and artifact path
+  classes. Lab cross-validated ROC AUC rose from 0.652 to 0.740 on `dataset.jsonl`
+  and from 0.685 to 0.756 on a second capture. Scores on real findings changed too:
+  a long-running system daemon after a package upgrade fell from 80 to 35.
+- Risk-model validation now keeps variants of each lab technique and findings from
+  each fleet host in one fold. Trust also requires at least 30 confirmed fleet labels
+  per class and a passing fleet-only evaluation; one fleet label can no longer unlock
+  a model validated mainly on attack-range data. Historical row-split metrics are
+  documented separately from the current validation protocol.
+- Every IPv4 address read from `/proc/net/tcp` was reversed: 127.0.0.1 was reported as
+  1.0.0.127, a Cloudflare address, in `miner-c2-outbound-connection` evidence and in
+  listening sockets. The hex was decoded as bytes and then read little-endian, reversing
+  it twice. IPv6 from `/proc/net/tcp6` was wrong too, being taken as a byte string
+  rather than four host-order words. Detection was unaffected, since no rule matches on
+  the address, but the evidence an analyst works from was not the real address.
+- A non-root scan account never ran the probe as root, so every scan of a host reached
+  as `ubuntu`, `dev` or similar came back `partial`, blind to `/dev/kmsg` and other users'
+  processes. The poligon meanwhile ran the probe under sudo, so the risk model trained
+  on what a root probe sees and scored hosts it could not see that way. The probe now
+  escalates through passwordless sudo or the stored password when the account is
+  allowed to, and falls back to the unprivileged scan when it is not.
+- `bladedr-lab --target` deleted files it had overwritten instead of restoring them:
+  a full run removed `sshd_config`, `nsswitch.conf`, `/etc/profile`, root's
+  `authorized_keys`, `/var/log/auth.log` and `/run/docker.sock` from the host it ran on.
+  Those plants now save the original and put it back, and a full run over SSH requires
+  `--disposable`.
+
 ## [0.9.1] - 2026-07-29
 
 Response actions did not work on any host where sudo asks for a password, which is most
