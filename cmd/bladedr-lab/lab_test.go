@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 
 	"bladedr/internal/probe"
@@ -56,5 +57,30 @@ func TestLabelFindingsMissWhenExpectAbsent(t *testing.T) {
 	exs := labelFindings(tch, "obvious", []probe.Finding{{RuleID: "other", DedupKey: "k"}}, map[string]rules.Rule{})
 	if len(exs) != 1 || exs[0].Detected {
 		t.Fatalf("expected a non-detection (Detected=false), got %+v", exs)
+	}
+}
+
+func TestCheckTargetScope(t *testing.T) {
+	priv := technique{ID: "core-pattern", Requires: "privileged"}
+	plain := technique{ID: "sshd-backdoor"}
+	cases := []struct {
+		name string
+		c    cfg
+		ts   []technique
+		ok   bool
+	}{
+		{"container runs everything", cfg{}, []technique{priv, plain}, true},
+		{"ssh with only the privileged set", cfg{target: "root@vm"}, []technique{priv}, true},
+		{"ssh full run refused", cfg{target: "root@vm"}, []technique{priv, plain}, false},
+		{"ssh full run on a declared throwaway", cfg{target: "root@vm", disposable: true}, []technique{priv, plain}, true},
+	}
+	for _, tc := range cases {
+		err := checkTargetScope(tc.c, tc.ts)
+		if (err == nil) != tc.ok {
+			t.Errorf("%s: err = %v, want ok=%v", tc.name, err, tc.ok)
+		}
+		if err != nil && !strings.Contains(err.Error(), "sshd-backdoor") {
+			t.Errorf("%s: refusal should name the technique: %v", tc.name, err)
+		}
 	}
 }

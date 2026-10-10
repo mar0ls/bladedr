@@ -10,11 +10,18 @@
 //	--connect N   listen on N and dial it on loopback, ESTABLISHED (miner-c2)
 //	--packet      open an AF_PACKET raw socket (packet-sniffer-process)
 //	--memfd       re-exec from an anonymous memfd (memfd-fileless-exec)
+//	--genkey FILE write a fresh unencrypted ed25519 SSH private key to FILE (mode 0600)
+//	              and exit — generated at plant time so no key is ever committed
+//	--map FILE    map FILE read+exec into this process, as a loaded shared library
+//	              (process-library-from-writable-path / process-library-deleted)
 //	(anything else / none) just sleep — for deleted/world-writable/masquerade/
 //	                        empty-environ/reverse-shell/ssh-tunnel via spoofed exec
 package main
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/pem"
 	"net"
 	"os"
 	"strconv"
@@ -22,6 +29,7 @@ import (
 	"time"
 	"unsafe"
 
+	"golang.org/x/crypto/ssh"
 	"golang.org/x/sys/unix"
 )
 
@@ -29,7 +37,13 @@ const holdFor = time.Hour // hold the resource well past a scan; the orchestrato
 
 func main() {
 	listen, connect, packet, memfd := 0, 0, false, false
+	mapFile := ""
 	args := os.Args[1:]
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--genkey" && i+1 < len(args) {
+			os.Exit(genKey(args[i+1]))
+		}
+	}
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--listen":
@@ -40,6 +54,11 @@ func main() {
 			packet = true
 		case "--memfd":
 			memfd = true
+		case "--map":
+			if i+1 < len(args) {
+				i++
+				mapFile = args[i]
+			}
 		}
 	}
 
@@ -61,12 +80,44 @@ func main() {
 			}
 		}
 	}
+	if mapFile != "" {
+		mapExecutable(mapFile)
+	}
 	if packet {
 		if fd, err := unix.Socket(unix.AF_PACKET, unix.SOCK_RAW, int(htons(unix.ETH_P_ALL))); err == nil {
 			defer unix.Close(fd)
 		}
 	}
 	time.Sleep(holdFor)
+}
+
+// mapExecutable maps the first page of a file read+exec, which is what the dynamic
+// linker does for a loaded library: /proc/PID/maps then lists the file with an r-x
+// mapping. The mapping is kept for the life of the process. A noexec filesystem refuses
+// PROT_EXEC; the technique then simply goes undetected there, as it would for an attacker.
+func mapExecutable(path string) {
+	f, err := os.Open(path)
+	if err != nil {
+		return
+	}
+	defer func() { _ = f.Close() }() // the mapping outlives the descriptor
+	_, _ = syscall.Mmap(int(f.Fd()), 0, os.Getpagesize(), syscall.PROT_READ|syscall.PROT_EXEC, syscall.MAP_PRIVATE)
+}
+
+// genKey writes a throwaway ed25519 private key in the OpenSSH format, unencrypted.
+func genKey(path string) int {
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return 1
+	}
+	block, err := ssh.MarshalPrivateKey(priv, "bladedr-poligon")
+	if err != nil {
+		return 1
+	}
+	if err := os.WriteFile(path, pem.EncodeToMemory(block), 0o600); err != nil {
+		return 1
+	}
+	return 0
 }
 
 func nextInt(args []string, i *int) int {

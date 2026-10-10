@@ -10,7 +10,8 @@
 //	(default)            a disposable Docker container built from poligon/Dockerfile
 //	--target user@host   a real Linux host over SSH (for privileged/kernel techniques
 //	                     that a container can't do); password via BLADEDR_LAB_SSH_PASSWORD,
-//	                     privileged steps use passwordless sudo on the target.
+//	                     privileged steps use passwordless sudo on the target. Anything
+//	                     beyond the privileged set also needs --disposable.
 //
 // It exercises the same detection engine as production (the probe + builtin rules).
 package main
@@ -28,20 +29,24 @@ import (
 
 	"bladedr/internal/probe"
 	"bladedr/internal/risk"
+	"bladedr/internal/rules"
+	"bladedr/internal/store"
 	"golang.org/x/crypto/ssh"
 	"gopkg.in/yaml.v3"
 )
 
 func main() {
 	var (
-		root     = flag.String("root", ".", "repo root (contains poligon/ and bin/)")
-		image    = flag.String("image", "bladedr-poligon", "container image tag (docker target)")
-		target   = flag.String("target", "", "SSH target user@host[:port] (default: a disposable container)")
-		out      = flag.String("out", "poligon/dataset.jsonl", "labelled dataset output path")
-		variants = flag.String("variants", "obvious,stealthy", "comma-separated naming variants to run")
-		only     = flag.String("only", "", "comma-separated technique ids to run (default: all)")
-		appendDS = flag.Bool("append", false, "append to the dataset instead of overwriting")
-		keep     = flag.Bool("keep", false, "keep the container/working dir after the run")
+		root       = flag.String("root", ".", "repo root (contains poligon/ and bin/)")
+		image      = flag.String("image", "bladedr-poligon", "container image tag (docker target)")
+		target     = flag.String("target", "", "SSH target user@host[:port] (default: a disposable container)")
+		out        = flag.String("out", "poligon/dataset.jsonl", "labelled dataset output path")
+		variants   = flag.String("variants", "obvious,stealthy", "comma-separated naming variants to run")
+		only       = flag.String("only", "", "comma-separated technique ids to run (default: all)")
+		appendDS   = flag.Bool("append", false, "append to the dataset instead of overwriting")
+		scenesOut  = flag.String("scenes-out", "poligon/scenes.jsonl", "multi-technique scene dataset output path")
+		keep       = flag.Bool("keep", false, "keep the container/working dir after the run")
+		disposable = flag.Bool("disposable", false, "allow non-privileged techniques on an SSH --target (throwaway hosts only)")
 		// Gates for CI. The run is informational without them: it prints MISSes and
 		// exits 0, so wiring it up unguarded would watch coverage rot in silence.
 		failOnMiss = flag.Bool("fail-on-miss", false, "exit non-zero if any scenario that ran did not fire its expected rule")
@@ -63,6 +68,7 @@ func main() {
 	if err := run(cfg{
 		root: *root, image: *image, target: *target, out: *out,
 		variants: splitCSV(*variants), only: splitSet(*only), appendDS: *appendDS, keep: *keep,
+		scenesOut: *scenesOut, disposable: *disposable,
 		failOnMiss: *failOnMiss, wantTechs: *wantTechs,
 	}); err != nil {
 		fmt.Fprintln(os.Stderr, "bladedr-lab:", err)
@@ -71,12 +77,12 @@ func main() {
 }
 
 type cfg struct {
-	root, image, target, out string
-	variants                 []string
-	only                     map[string]bool
-	appendDS, keep           bool
-	failOnMiss               bool
-	wantTechs                int
+	root, image, target, out, scenesOut string
+	variants                            []string
+	only                                map[string]bool
+	appendDS, keep, disposable          bool
+	failOnMiss                          bool
+	wantTechs                           int
 }
 
 func run(c cfg) error {
@@ -111,6 +117,9 @@ func run(c cfg) error {
 		// a perfect score.
 		fmt.Printf("==> %d technique(s) need a real host and were NOT exercised: %s\n",
 			len(skipped), strings.Join(skipped, ", "))
+	}
+	if err := checkTargetScope(c, techs); err != nil {
+		return err
 	}
 	if c.wantTechs > 0 && len(techs) != c.wantTechs {
 		return fmt.Errorf("selected %d techniques, expected %d — the manifest or the skip rules changed; "+
@@ -199,6 +208,9 @@ func run(c cfg) error {
 			v = strings.TrimSpace(v)
 			if _, err := r.sh(tech(t.ID, "plant", v)); err != nil {
 				fmt.Printf("  ! %-22s %-8s plant failed: %v\n", t.ID, v, err)
+				// A plant can fail halfway — after it saved an original, after mkdir —
+				// so clean regardless. Restoring what was never replaced is a no-op.
+				r.sh(tech(t.ID, "clean", v))
 				continue
 			}
 			fs, err := scan()
@@ -219,34 +231,146 @@ func run(c cfg) error {
 		}
 	}
 
+	// Scenes: several techniques on one host, scanned once, so the rows carry siblings.
+	// Written to their own file rather than mixed into dataset.jsonl — a scene replants
+	// techniques the loop above already covered, so merging them would duplicate rows and
+	// quietly reweight the training set. Whether the sibling count separates an intrusion
+	// from a busy-but-legitimate host is the open question these rows exist to answer.
+	sceneRows, sceneFailures, err := runScenes(c, man.Scenes, techs, meta, baseline, tech, scan, r)
+	if err != nil {
+		return err
+	}
+	if c.failOnMiss && sceneFailures > 0 {
+		return fmt.Errorf("%d scene plant(s) failed — the scene finding counts they produced are not comparable", sceneFailures)
+	}
+	if len(sceneRows) > 0 {
+		if err := writeDataset(filepath.Join(c.root, c.scenesOut), sceneRows, false); err != nil {
+			return err
+		}
+	}
+
 	if err := writeDataset(filepath.Join(c.root, c.out), dataset, c.appendDS); err != nil {
 		return err
 	}
-	hit, total := report(techs, c.variants, cov, dataset, c.out)
+	hit, total := report(techs, c.variants, cov, dataset, sceneRows, c.out)
 	if c.failOnMiss && hit != total {
 		return fmt.Errorf("%d of %d scenarios did not fire their expected rule", total-hit, total)
 	}
 	return nil
 }
 
+// runScenes plants each scene's techniques together, scans once, and labels every
+// finding that scan produced with the scene's class — so each row knows how many other
+// findings shared its host. Techniques are cleaned in reverse order, so one that
+// overwrote another's file is removed first.
+//
+// A scene is skipped rather than partially run when any of its techniques did not run
+// here (a --only filter, or one that needs a privileged host): a scene missing a plant
+// reports a smaller finding count for the wrong reason, which is worse than no row.
+func runScenes(c cfg, scenes []scene, techs []technique, meta map[string]rules.Rule,
+	baseline map[string]bool, tech func(id, act, v string) string,
+	scan func() ([]probe.Finding, error), r runner) ([]example, int, error) {
+
+	if len(scenes) == 0 {
+		return nil, 0, nil
+	}
+	failedPlants := 0
+	available := map[string]bool{}
+	for _, t := range techs {
+		available[t.ID] = true
+	}
+
+	var rows []example
+	for _, sc := range scenes {
+		var missing []string
+		for _, id := range sc.Techniques {
+			if !available[id] {
+				missing = append(missing, id)
+			}
+		}
+		if len(missing) > 0 {
+			fmt.Printf("  skip scene %-22s (not exercised here: %s)\n", sc.ID, strings.Join(missing, ", "))
+			continue
+		}
+		for _, v := range c.variants {
+			v = strings.TrimSpace(v)
+			planted := make([]string, 0, len(sc.Techniques))
+			for _, id := range sc.Techniques {
+				if _, err := r.sh(tech(id, "plant", v)); err != nil {
+					// Counted, not just printed: a scene short one plant reports a
+					// smaller finding count for a reason that has nothing to do with
+					// detection, and that number would go straight into the dataset.
+					fmt.Printf("  ! scene %s: %s plant failed: %v\n", sc.ID, id, err)
+					failedPlants++
+					r.sh(tech(id, "clean", v))
+					continue
+				}
+				planted = append(planted, id)
+			}
+			fs, err := scan()
+			if err != nil {
+				return nil, failedPlants, err
+			}
+			newF := newFindings(baseline, fs)
+			for _, f := range newF {
+				m := meta[f.RuleID]
+				rows = append(rows, example{
+					Technique: sc.ID, Variant: v,
+					RuleID: f.RuleID, Category: m.Category, Severity: m.Severity, Mitre: m.Mitre,
+					Source: "lab", Label: sc.label(), Evidence: f.Evidence,
+					Scene: sc.ID, SceneFindings: len(newF),
+				})
+			}
+			fmt.Printf("  scene %-22s %-8s %d findings across %d rules (%d techniques planted)\n",
+				sc.ID, v, len(newF), distinctRules(newF), len(planted))
+			for i := len(planted) - 1; i >= 0; i-- {
+				r.sh(tech(planted[i], "clean", v))
+			}
+		}
+	}
+	return rows, failedPlants, nil
+}
+
 // report prints the detection-coverage matrix, the generalisation check, and the
 // dataset composition — the blue-team + ML summary of the run.
 // report prints the run summary and returns the scenarios that fired and the total that
 // ran, so the caller can turn that into an exit status.
-func report(techs []technique, variants []string, cov map[covKey]bool, dataset []example, outPath string) (hitOut, totalOut int) {
-	total, hit := 0, 0
-	for _, t := range techs {
+//
+// Attack and benign-but-flagged scenarios are counted separately. They answer different
+// questions — "does the rule catch the attack" versus "does this legitimate config trip
+// it too" — and one ratio over both is neither. The negative class is deliberately being
+// grown towards the size the risk model needs, so folding it in would let benign
+// scenarios inflate a number every reader takes for detection coverage.
+func report(techs []technique, variants []string, cov map[covKey]bool, dataset, sceneRows []example, outPath string) (hitOut, totalOut int) {
+	fired := func(t technique) (hit, total int) {
 		for _, v := range variants {
 			total++
 			if cov[covKey{t.ID, strings.TrimSpace(v)}] {
 				hit++
 			}
 		}
+		return hit, total
 	}
-	fmt.Printf("\n==> detection coverage: %d/%d technique+variant scenarios fired their expected rule\n", hit, total)
+	var hit, total, benignHit, benignTotal, attacks int
+	for _, t := range techs {
+		h, n := fired(t)
+		if t.label() == "false_positive" {
+			benignHit, benignTotal = benignHit+h, benignTotal+n
+			continue
+		}
+		hit, total, attacks = hit+h, total+n, attacks+1
+	}
+	fmt.Printf("\n==> detection coverage: %d/%d attack scenarios fired their expected rule\n", hit, total)
+	// A benign scenario that stops firing is not good news either: it silently drops a
+	// row from the negative class, which is the half of the training set the model is
+	// short of. Reported next to coverage, never inside it.
+	fmt.Printf("==> negative-class calibration: %d/%d benign scenarios still trip their ambiguous rule\n", benignHit, benignTotal)
 
 	gen := 0
 	for _, t := range techs {
+		if t.label() == "false_positive" {
+			continue
+		}
 		all := true
 		for _, v := range variants {
 			if !cov[covKey{t.ID, strings.TrimSpace(v)}] {
@@ -257,7 +381,7 @@ func report(techs []technique, variants []string, cov map[covKey]bool, dataset [
 			gen++
 		}
 	}
-	fmt.Printf("==> generalises across naming variants: %d/%d techniques\n", gen, len(techs))
+	fmt.Printf("==> generalises across naming variants: %d/%d attack techniques\n", gen, attacks)
 
 	tacticOf := map[string]string{}
 	for _, t := range techs {
@@ -274,7 +398,7 @@ func report(techs []technique, variants []string, cov map[covKey]bool, dataset [
 
 	pos, neg := 0, 0
 	for _, e := range dataset {
-		switch risk.LabelOf(e.observation().Status) {
+		switch risk.LabelOf(e.observation().Verdict) {
 		case risk.Positive:
 			pos++
 		case risk.Negative:
@@ -282,7 +406,42 @@ func report(techs []technique, variants []string, cov map[covKey]bool, dataset [
 		}
 	}
 	fmt.Printf("==> ML: %d technique-labelled POSITIVES + %d benign-but-flagged NEGATIVES ready to mix with prod triage\n", pos, neg)
-	return hit, total
+
+	// Feature ablation, printed on every run because it is the one number that says
+	// whether the model learned anything beyond "which rule fired". Features() emits a
+	// rule:<id> token; if the ranking survives only while that token is present, the
+	// model is a lookup table over rule ids and its cross-validated score is measuring
+	// memorisation. Both sides run the identical protocol (same folds, seeds, metrics),
+	// so the gap is attributable to the withheld feature and nothing else.
+	var labelled []*store.Observation
+	for _, e := range dataset {
+		labelled = append(labelled, e.observation())
+	}
+	full := risk.Evaluate(labelled)
+	// The headline number, printed first because it is the one the model exists to move.
+	// A rule that fires on both real findings and noise is only useful if the model can
+	// tell two of its instances apart; a tied rule means it cannot, and the score it
+	// returns is the rule's own static score wearing a model's clothes.
+	if aMean, bMean, aN, bN := sceneFindingStats(sceneRows); aN+bN > 0 {
+		fmt.Printf("==> scene co-occurrence: attack scenes %.1f findings on average (n=%d), benign scenes %.1f (n=%d)\n",
+			aMean, aN, bMean, bN)
+	}
+	fmt.Printf("==> within-rule separation: %d of %d ambiguous rules are TIED — every instance scores the same (lower is better)\n",
+		full.WithinRuleTied, full.WithinRuleRules)
+	// Two ablations, because either alone misleads. Dropping "rule:" does not remove rule
+	// identity — category, severity and the MITRE ids are rule metadata and reconstruct it
+	// for most rules — so the block ablation is the one to read. The shape ablation says
+	// how much of the ranking the instance-level features are carrying.
+	noRuleBlock := risk.EvaluateWithout(labelled, "rule:", "cat:", "sev:", "tech:", "tac:")
+	noShape := risk.EvaluateWithout(labelled, "shape:")
+	fmt.Printf("==> feature ablation: ROC AUC %.3f (±%.3f) full | %.3f without instance-shape features | %.3f without any rule-derived feature\n",
+		full.CVROCAUC, full.CVROCAUCStdDev, noShape.CVROCAUC, noRuleBlock.CVROCAUC)
+	fmt.Printf("==> balanced accuracy: %.3f full | %.3f shape withheld (0.500 is chance)\n",
+		full.CVBalancedAccuracy, noShape.CVBalancedAccuracy)
+	fmt.Printf("==> lab-only trust check: %v (%s)\n", full.Trustworthy, full.Reason)
+	// Both classes are returned to the caller: --fail-on-miss gates on every scenario
+	// that ran, attack or benign, because either going quiet costs the model data.
+	return hit + benignHit, total + benignTotal
 }
 
 func writeDataset(path string, dataset []example, appendMode bool) error {
@@ -338,6 +497,37 @@ func splitSet(s string) map[string]bool {
 }
 
 // ---- targets ----------------------------------------------------------------
+
+// checkTargetScope refuses to run the container-grade techniques on an SSH target
+// unless the operator says the host is throwaway. They are written for a container that
+// is deleted afterwards: while the run lasts the host carries a world-writable
+// /etc/passwd, SUID root shells, uid-0 and passwordless accounts and a replaced
+// sshd_config, and a run that dies mid-way leaves them there. The privileged set is
+// what --target exists for, and it is reversible by design.
+func checkTargetScope(c cfg, techs []technique) error {
+	if c.target == "" || c.disposable {
+		return nil
+	}
+	var unsafe []string
+	for _, t := range techs {
+		if t.Requires != "privileged" {
+			unsafe = append(unsafe, t.ID)
+		}
+	}
+	if len(unsafe) == 0 {
+		return nil
+	}
+	return fmt.Errorf("%d non-privileged technique(s) selected for SSH target %s (%s); they weaken the host while "+
+		"they run — pass --only with the privileged set, or --disposable if %s is a throwaway VM",
+		len(unsafe), c.target, abbreviate(unsafe, 5), c.target)
+}
+
+func abbreviate(ids []string, n int) string {
+	if len(ids) <= n {
+		return strings.Join(ids, ", ")
+	}
+	return strings.Join(ids[:n], ", ") + fmt.Sprintf(", … +%d", len(ids)-n)
+}
 
 // runner abstracts where techniques run: exec a shell command, copy a file in.
 type runner interface {

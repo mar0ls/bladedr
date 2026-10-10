@@ -159,6 +159,25 @@ techniques:
   - id: deleted-binary
     tactic: process
     expect: deleted-running-binary
+  - id: weak-hash
+    tactic: credential
+    expect: weak-password-hash-scheme
+  - id: ssh-private-key-plain
+    tactic: credential
+    expect: unprotected-ssh-private-key
+  - id: benign-ci-deploy-key
+    tactic: credential
+    expect: unprotected-ssh-private-key
+    label: false_positive
+  - id: lib-writable
+    tactic: process
+    expect: process-library-from-writable-path
+  - id: lib-deleted
+    tactic: process
+    expect: process-library-deleted
+  - id: preload-env
+    tactic: process
+    expect: process-ld-preload-env
   - id: exec-world-writable
     tactic: process
     expect: exec-from-world-writable
@@ -267,7 +286,149 @@ techniques:
     tactic: persistence
     expect: systemd-suspicious-execstart
     label: false_positive
+  - id: benign-appimage-lib
+    tactic: process
+    expect: process-library-from-writable-path
+    label: false_positive
+  - id: benign-jvm-native-lib
+    tactic: process
+    expect: process-library-deleted
+    label: false_positive
+  - id: benign-preload-faketime
+    tactic: process
+    expect: process-ld-preload-env
+    label: false_positive
   - id: benign-supervisor-port
     tactic: network
     expect: suspicious-port-listener
     label: false_positive
+  - id: benign-backup-sudo-tar
+    tactic: privilege
+    expect: sudo-gtfobins-binary
+    label: false_positive
+  - id: benign-apm-ptrace-cap
+    tactic: privilege
+    expect: dangerous-file-capability
+    label: false_positive
+  - id: benign-internal-mirror
+    tactic: supply-chain
+    expect: package-repo-unverified
+    label: false_positive
+  - id: benign-ci-docker-sock
+    tactic: privilege
+    expect: docker-socket-exposed
+    label: false_positive
+  - id: benign-nss-extrausers
+    tactic: persistence
+    expect: nsswitch-unusual-module
+    label: false_positive
+  - id: benign-backup-key-env
+    tactic: persistence
+    expect: authorized-keys-suspicious-option
+    label: false_positive
+  - id: benign-upgraded-daemon
+    tactic: process
+    expect: deleted-running-binary
+    label: false_positive
+  - id: benign-apm-py-hook
+    tactic: persistence
+    expect: python-pth-code-execution
+    label: false_positive
+  - id: benign-vendor-permissive
+    tactic: evasion
+    expect: selinux-disabled
+    label: false_positive
+  - id: benign-ci-nohistory
+    tactic: evasion
+    expect: shell-history-disabled
+    label: false_positive
+  - id: benign-dba-tunnel
+    tactic: network
+    expect: ssh-tunnel-process
+    label: false_positive
+  - id: benign-netflow-agent
+    tactic: network
+    expect: packet-sniffer-process
+    label: false_positive
+  - id: benign-ci-build-tmp
+    tactic: process
+    expect: exec-from-world-writable
+    label: false_positive
+  - id: benign-installer-staging
+    tactic: evasion
+    expect: hidden-executable-in-writable
+    label: false_positive
+  - id: benign-audit-toolbox
+    tactic: discovery
+    expect: offensive-tool-on-disk
+    label: false_positive
+  - id: benign-legacy-uid-alias
+    tactic: persistence
+    expect: duplicate-uid-account
+    label: false_positive
+  - id: benign-metrics-cron-pipe
+    tactic: persistence
+    expect: cron-suspicious-command
+    label: false_positive
+  - id: benign-deploy-unit-group
+    tactic: persistence
+    expect: writable-persistence-file
+    label: false_positive
+  - id: benign-dev-ssh-localcmd
+    tactic: persistence
+    expect: ssh-config-localcommand
+    label: false_positive
+  - id: benign-vendor-supervisor
+    tactic: persistence
+    expect: supervisor-command-writable
+    label: false_positive
+  - id: benign-staging-execpre
+    tactic: persistence
+    expect: systemd-exec-directive-writable
+    label: false_positive
+
+# Scenes: several techniques planted together, scanned once, cleaned together.
+#
+# The per-technique loop above answers "does this rule fire", and it answers it on a host
+# that is otherwise pristine — one plant, one finding, a clean baseline underneath. No
+# real host looks like that, and the consequence is that the dataset it produces cannot
+# express co-occurrence: every row has exactly one sibling-free finding, so a model can
+# never learn that an intrusion usually trips several rules at once while a legitimate
+# configuration trips one.
+#
+# A scene plants a whole posture instead: an attack chain, or a host doing a legitimate
+# job that happens to trip several ambiguous rules. Whether the resulting finding counts
+# actually separate the two is an open question — this exists to measure it, not to
+# assume it. Techniques within a scene must not clobber each other's files.
+scenes:
+  - id: webshell-to-root
+    label: true_positive
+    techniques: [webshell, cron-cradle, uid0-account]
+  - id: ssh-implant
+    label: true_positive
+    techniques: [ssh-service-key, authorized-keys-option, ld-preload]
+  - id: container-escape
+    label: true_positive
+    techniques: [docker-socket, suid-writable, hidden-exec]
+  - id: supplychain-implant
+    label: true_positive
+    techniques: [apt-hook, apt-unverified, liblzma-backdoor]
+  - id: cryptominer
+    label: true_positive
+    techniques: [miner-c2, port-listener, systemd-service, exec-world-writable]
+
+  - id: ci-runner
+    label: false_positive
+    techniques: [benign-ci-docker, benign-ci-docker-sock, benign-ci-build-tmp, benign-ci-nohistory]
+  - id: backup-host
+    label: false_positive
+    techniques: [benign-backup-sudo-tar, benign-backup-key-env, benign-metrics-cron-pipe]
+  - id: staging-deploy
+    label: false_positive
+    techniques: [benign-deploy-unit-group, benign-staging-execpre, benign-home-service]
+  - id: observability-agent
+    label: false_positive
+    techniques: [benign-apm-ptrace-cap, benign-apm-py-hook, benign-netflow-agent]
+  - id: dev-workstation
+    label: false_positive
+    techniques: [benign-sysctl-dev, benign-dev-path, benign-dev-ssh-localcmd, benign-installer-staging]

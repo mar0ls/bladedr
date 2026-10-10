@@ -18,6 +18,9 @@ coverage.html
 *.key
 
 /poligon/dataset.jsonl
+/poligon/scenes.jsonl
+/poligon/dataset-*.jsonl
+/poligon/scenes-*.jsonl
 
 
 TELEMETRY.md
@@ -39,3 +42,4 @@ Thumbs.db
 /bladedr-probe
 /bladedr-server
 /bladedr-sensor
+/bladedr-lab
