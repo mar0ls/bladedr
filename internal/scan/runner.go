@@ -168,8 +168,10 @@ func (r *Runner) Scan(ctx context.Context, host *store.Host, trigger string) (*s
 		risk += meta.Score
 	}
 
-	risk += r.applyBaseline(ctx, host, sc, result.StateDigest)
+	inventory := takeInventory(result.StateDigest)
+	risk += r.applyBaseline(ctx, host, sc, result.StateDigest, result.BpfPrograms...)
 	risk += r.applyRarity(ctx, host, sc, result.StateDigest)
+	risk += r.applyCredentialReuse(ctx, host, sc, inventory)
 	if risk > 100 {
 		risk = 100
 	}
@@ -177,11 +179,13 @@ func (r *Runner) Scan(ctx context.Context, host *store.Host, trigger string) (*s
 
 	r.updateHostFromResult(ctx, host, result)
 
-	status := store.ScanOK
+	status, detail := store.ScanOK, ""
 	if len(result.CollectorErrors) > 0 {
-		status = store.ScanPartial
+		// What the collectors could not read is the answer to "why partial", so it is kept
+		// in the scan's error field.
+		status, detail = store.ScanPartial, strings.Join(result.CollectorErrors, "; ")
 	}
-	return finish(status, "")
+	return finish(status, detail)
 }
 
 // baselineCategory maps a digest category to an observation category.
@@ -210,7 +214,7 @@ var categoryMitre = map[string][]string{
 // in the baseline (drift). The baseline is frozen until re-established via the API,
 // so genuine drift keeps surfacing until an operator acknowledges it. Returns the
 // drift contribution to the scan risk score.
-func (r *Runner) applyBaseline(ctx context.Context, host *store.Host, sc *store.Scan, digest map[string][]string) int {
+func (r *Runner) applyBaseline(ctx context.Context, host *store.Host, sc *store.Scan, digest map[string][]string, bpfPrograms ...probe.BpfProg) int {
 	if len(digest) == 0 {
 		return 0
 	}
@@ -246,6 +250,19 @@ func (r *Runner) applyBaseline(ctx context.Context, host *store.Host, sc *store.
 				Evidence: map[string]any{"category": cat, "item": it},
 				DedupKey: "baseline|" + cat + "|" + it,
 				Status:   store.ObsOpen,
+			}
+			if cat == probe.DigestBpfPrograms {
+				obs.Evidence["scan_started_at"] = sc.StartedAt
+				var matches []probe.BpfProg
+				for _, p := range bpfPrograms {
+					if p.Type+":"+p.Tag == it {
+						matches = append(matches, p)
+					}
+				}
+				obs.Evidence["programs"] = matches
+				if len(matches) == 0 {
+					obs.Evidence["evidence_status"] = "unavailable"
+				}
 			}
 			if _, err := r.Store.UpsertObservation(ctx, obs); err == nil {
 				drift += 10

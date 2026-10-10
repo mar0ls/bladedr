@@ -122,6 +122,7 @@ SSH key/password, **reusable** across hosts (one key → many machines).
 | auth_type | text enum | `ssh_key` \| `password` \| `ssh_agent` |
 | secret_ref | text | path to key / vault reference; **no plaintext stored** |
 | secret_enc | blob | secret sealed to the node public key; never plaintext |
+| sudo_secret_enc | blob, nullable | optional sudo password, sealed the same way; lets a key or non-root account run the probe as root |
 | created_at | datetime | |
 
 > Secret protection: secrets are sealed with a Curve25519 public key (NaCl sealed
@@ -160,7 +161,7 @@ A single agentless run against a host.
 | probe_version | text | |
 | started_at / finished_at | datetime | |
 | duration_ms | int | |
-| error | text | when `failed` |
+| error | text | the failure when `failed`; what the collectors could not read when `partial` |
 | risk_score | int | aggregated 0–100 for this scan |
 
 ### 3.6 observation — **shared findings + events table**
@@ -181,6 +182,7 @@ differ in the `source` field.
 | evidence | json | the proof: snapshot fragment / event payload |
 | dedup_key | text | stable key — collapses repeats |
 | status | text enum | `open` \| `acknowledged` \| `resolved` \| `false_positive` |
+| verdict | text enum | `unknown` \| `true_positive` \| `false_positive`; independent ML assessment |
 | first_seen / last_seen | datetime | |
 | count | int | how many times deduplicated |
 
@@ -220,6 +222,17 @@ Implements "scan frequency" — per host or per collection.
 | config | json | `{url, index, api_key, ...}` |
 | filter | json | e.g. min severity, only selected collections |
 | enabled | bool | |
+
+### 3.10 host_inventory
+The current credential inventory of a host, replaced on every scan. Fingerprints only.
+| column | type | description |
+|---|---|---|
+| host_id | uuid PK, FK | |
+| items | json | `authorized_keys` (`account:sha256`), `password_hashes` (`account:fingerprint`), `private_keys` (`account:sha256:plain\|locked`) |
+| updated_at | datetime | |
+
+Used to find a key, a private key or a password hash shared across hosts. It is not the
+baseline: that is frozen at the first scan, so a key added later would never appear in it.
 
 ---
 
@@ -369,7 +382,7 @@ GET    /scans/{id}                 # status + risk_score
 ```
 GET    /observations               # ?host=&severity=&status=&source=&rule=&q=  (q = BM25)
 GET    /observations/{id}
-PATCH  /observations/{id}          # {status: acknowledged|resolved|false_positive}
+PATCH  /observations/{id}          # {action: take_ownership|confirm_finding|close_false_positive|resolve|close_inconclusive|reopen}; legacy status OR verdict also supported
 ```
 
 ### Rules (user/DB-managed; merged with builtin at scan time)
@@ -412,8 +425,10 @@ GET /ui/hosts                  hosts + tags + open-finding counts; tag filter
 POST /ui/hosts                 "+ Add host" form (seals secret, creates cred+host)
                                per-row "Scan now" button → POST /hosts/{id}/scans
 ```
-Triage buttons (Ack / Resolve / False-Positive) PATCH the JSON API; these status
-changes are the human labels that will feed the future ML risk-scoring tier.
+Triage buttons PATCH an `action` to the JSON API. The store updates workflow status
+and analyst verdict atomically. Resolution requires a positive verdict; reopening
+preserves assessment. `Change assessment` only changes the verdict. Training reads
+explicit verdicts, never workflow status. See the action table in README.
 
 ### Export — ECS / SIEM
 ```

@@ -4,7 +4,10 @@
 // field so collectors can add fields without breaking older servers.
 package probe
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 // Schema identifiers for the three contracts (DESIGN section 4).
 const (
@@ -52,6 +55,7 @@ type ScanResult struct {
 	// ports, modules, accounts, authorized keys, cron, systemd units) used by the
 	// server's baseline/drift engine. Always present; small.
 	StateDigest map[string][]string `json:"state_digest,omitempty"`
+	BpfPrograms []BpfProg           `json:"bpf_programs,omitempty"`
 	// Snapshot is populated only when the probe is run with --emit-snapshot; it
 	// allows re-evaluating new rules against old state without re-entering the host.
 	Snapshot *Snapshot `json:"snapshot,omitempty"`
@@ -72,70 +76,71 @@ type Finding struct {
 // ----------------------------------------------------------------------------
 
 type Snapshot struct {
-	Schema                 string            `json:"schema"`
-	ProbeVersion           string            `json:"probe_version"`
-	CollectedAt            time.Time         `json:"collected_at"`
-	Host                   HostInfo          `json:"host"`
-	Processes              []Process         `json:"processes"`
-	ListeningSockets       []Socket          `json:"listening_sockets"`
-	Persistence            Persistence       `json:"persistence"`
-	KernelModules          []KernelModule    `json:"kernel_modules"`
-	SuspiciousFiles        []FileEntry       `json:"suspicious_files"`
-	Accounts               []Account         `json:"accounts"`
-	KernelLog              []KernelLogEntry  `json:"kernel_log"`
-	PAMModules             []PAMEntry        `json:"pam_modules"`
-	PthFiles               []PthFile         `json:"pth_files"`
-	ImmutableFiles         []string          `json:"immutable_files"`
-	HiddenModules          []string          `json:"hidden_modules"` // in /proc/modules but not /sys/module
-	UdevRules              []UdevRule        `json:"udev_rules"`
-	BinfmtEntries          []BinfmtEntry     `json:"binfmt_entries"`
-	StartupScripts         []StartupScript   `json:"startup_scripts"`
-	ShellInit              []StartupScript   `json:"shell_init"`               // .bashrc/profile with suspicious lines
-	Supervisor             []SupervisorProg  `json:"supervisor"`               // supervisord programs
-	HiddenPIDs             []int             `json:"hidden_pids"`              // stat-accessible but not in /proc readdir
-	AtJobs                 []StartupScript   `json:"at_jobs"`                  // at(1) spool jobs with suspicious lines
-	SuspiciousKsyms        []string          `json:"suspicious_ksyms"`         // /proc/kallsyms symbols matching rootkit names
-	SudoRules              []SudoRule        `json:"sudo_rules"`               // notable sudoers lines (NOPASSWD/SETENV/writable)
-	NfsExports             []string          `json:"nfs_exports"`              // /etc/exports lines
-	WorldWritableSensitive []string          `json:"world_writable_sensitive"` // sensitive files writable by other
-	PathHijack             []string          `json:"path_hijack"`              // cwd/world-writable entries in system PATH
-	OutboundConns          []Conn            `json:"outbound_conns"`           // established conns to suspicious remote ports
-	PasswordlessAccounts   []string          `json:"passwordless_accounts"`    // /etc/shadow entries with empty hash
-	PrivGroupMembers       []GroupMember     `json:"priv_group_members"`       // members of sudo/wheel/docker/root/...
-	WebShells              []StartupScript   `json:"web_shells"`               // web-root files with webshell code patterns
-	BpfPinned              []string          `json:"bpf_pinned"`               // pinned objects under /sys/fs/bpf
-	BpfPrograms            []BpfProg         `json:"bpf_programs"`             // loaded eBPF programs (bpf(BPF_PROG_GET_NEXT_ID))
-	PackageHooks           []PackageHook     `json:"package_hooks"`            // suspicious apt/dpkg hooks (cradle/writable command)
-	WebServerModules       []WebServerModule `json:"web_server_modules"`       // apache/nginx modules loaded from a writable path
-	ModprobeCommands       []ModprobeCommand `json:"modprobe_commands"`        // modprobe.d install/remove running an arbitrary command
-	LdSoConf               []LdConfEntry     `json:"ld_so_conf"`               // ld.so.conf{,.d} library dirs under a writable path
-	EnvPreload             []StartupScript   `json:"env_preload"`              // global env files setting LD_PRELOAD / writable LD_LIBRARY_PATH
-	SuidBinaries           []FileEntry       `json:"suid_binaries"`            // SUID shell-escape/interpreter binaries (GTFOBins privesc)
-	WritablePersistence    []string          `json:"writable_persistence"`     // root-executed config files writable by a non-root user
-	DangerousCapabilities  []FileEntry       `json:"dangerous_capabilities"`   // binaries with a privesc file capability (Caps = decoded names)
-	CronPathHijack         []string          `json:"cron_path_hijack"`         // cron PATH= lines with a writable/relative dir
-	NsswitchUnusual        []string          `json:"nsswitch_unusual"`         // nsswitch.conf modules outside the standard set (libnss backdoor)
-	ProcMountHides         []string          `json:"proc_mount_hides"`         // bind mounts over /proc/<pid> (process-hiding rootkit)
-	SysctlHardeningOff     []string          `json:"sysctl_hardening_off"`     // sysctl config disabling a hardening control (ptrace_scope=0, ...)
-	UnverifiedRepos        []string          `json:"unverified_repos"`         // pkg repos accepting unsigned packages (apt trusted=yes / dnf gpgcheck=0)
-	SshTunnels             []string          `json:"ssh_tunnels"`              // live ssh client tunnels (-D SOCKS / -R / persistent -N -f)
-	InitramfsHooks         []StartupScript   `json:"initramfs_hooks"`          // initramfs/dracut hook with a cradle (boot-time persistence)
-	K8sStaticPods          []StartupScript   `json:"k8s_static_pods"`          // non-standard privileged/host* static pod manifests (k8s persistence)
-	ExposedKubeconfigs     []string          `json:"exposed_kubeconfigs"`      // kubeconfig/admin.conf with creds, readable by non-root
-	PromiscInterfaces      []string          `json:"promisc_interfaces"`       // non-virtual NICs in promiscuous mode (sniffer); bridges/taps filtered
-	OutOfTreeModules       []string          `json:"out_of_tree_modules"`      // taint/out-of-tree dmesg loads, minus legit DKMS (zfs/nvidia/vbox/...)
-	ShellHistoryTampering  []StartupScript   `json:"shell_history_tampering"`  // shell rc disabling history (HISTFILE=/dev/null, HISTSIZE=0, unset)
-	TamperedLogs           []string          `json:"tampered_logs"`            // /var/log files replaced by a symlink (e.g. to /dev/null)
-	SuspiciousShells       []string          `json:"suspicious_shells"`        // accounts whose login shell is an interpreter or under a writable path
-	WritableSuid           []FileEntry       `json:"writable_suid"`            // SUID/SGID binaries also writable by group/other (trivial privesc)
-	XdgAutostart           []StartupScript   `json:"xdg_autostart"`            // XDG autostart .desktop entries with a cradle/writable Exec
-	SshClientCommands      []StartupScript   `json:"ssh_client_commands"`      // ssh_config LocalCommand / cradle ProxyCommand (exec on connect)
-	LibVersions            []LibVersion      `json:"lib_versions"`             // versions of key shared libraries (supply-chain)
-	SystemdTimers          []SystemdTimer    `json:"systemd_timers"`           // .timer units with the ExecStart of the service they activate (time-triggered persistence)
-	SelinuxDisabled        []string          `json:"selinux_disabled"`         // SELinux turned off where it is installed (/etc/selinux/config or kernel cmdline)
-	DnfPlugins             []DnfPlugin       `json:"dnf_plugins"`              // dnf/yum plugin files writable by a non-root user (runs as root every transaction)
-	Facts                  map[string]any    `json:"facts"`
-	CollectorErrors        []string          `json:"collector_errors"`
+	Schema                 string                     `json:"schema"`
+	ProbeVersion           string                     `json:"probe_version"`
+	CollectedAt            time.Time                  `json:"collected_at"`
+	Host                   HostInfo                   `json:"host"`
+	Processes              []Process                  `json:"processes"`
+	ListeningSockets       []Socket                   `json:"listening_sockets"`
+	Persistence            Persistence                `json:"persistence"`
+	KernelModules          []KernelModule             `json:"kernel_modules"`
+	SuspiciousFiles        []FileEntry                `json:"suspicious_files"`
+	Accounts               []Account                  `json:"accounts"`
+	KernelLog              []KernelLogEntry           `json:"kernel_log"`
+	PAMModules             []PAMEntry                 `json:"pam_modules"`
+	PthFiles               []PthFile                  `json:"pth_files"`
+	ImmutableFiles         []string                   `json:"immutable_files"`
+	HiddenModules          []string                   `json:"hidden_modules"` // in /proc/modules but not /sys/module
+	UdevRules              []UdevRule                 `json:"udev_rules"`
+	BinfmtEntries          []BinfmtEntry              `json:"binfmt_entries"`
+	StartupScripts         []StartupScript            `json:"startup_scripts"`
+	ShellInit              []StartupScript            `json:"shell_init"`               // .bashrc/profile with suspicious lines
+	Supervisor             []SupervisorProg           `json:"supervisor"`               // supervisord programs
+	HiddenPIDs             []int                      `json:"hidden_pids"`              // stat-accessible but not in /proc readdir
+	AtJobs                 []StartupScript            `json:"at_jobs"`                  // at(1) spool jobs with suspicious lines
+	SuspiciousKsyms        []string                   `json:"suspicious_ksyms"`         // /proc/kallsyms symbols matching rootkit names
+	SudoRules              []SudoRule                 `json:"sudo_rules"`               // notable sudoers lines (NOPASSWD/SETENV/writable)
+	NfsExports             []string                   `json:"nfs_exports"`              // /etc/exports lines
+	WorldWritableSensitive []string                   `json:"world_writable_sensitive"` // sensitive files writable by other
+	PathHijack             []string                   `json:"path_hijack"`              // cwd/world-writable entries in system PATH
+	OutboundConns          []Conn                     `json:"outbound_conns"`           // established conns to suspicious remote ports
+	PasswordlessAccounts   []string                   `json:"passwordless_accounts"`    // /etc/shadow entries with empty hash
+	PrivateKeys            []PrivateKeyFile           `json:"private_keys"`             // SSH private keys under home directories
+	PrivGroupMembers       []GroupMember              `json:"priv_group_members"`       // members of sudo/wheel/docker/root/...
+	WebShells              []StartupScript            `json:"web_shells"`               // web-root files with webshell code patterns
+	BpfPinned              []string                   `json:"bpf_pinned"`               // pinned objects under /sys/fs/bpf
+	BpfPrograms            []BpfProg                  `json:"bpf_programs"`             // loaded eBPF programs (bpf(BPF_PROG_GET_NEXT_ID))
+	PackageHooks           []PackageHook              `json:"package_hooks"`            // suspicious apt/dpkg hooks (cradle/writable command)
+	WebServerModules       []WebServerModule          `json:"web_server_modules"`       // apache/nginx modules loaded from a writable path
+	ModprobeCommands       []ModprobeCommand          `json:"modprobe_commands"`        // modprobe.d install/remove running an arbitrary command
+	LdSoConf               []LdConfEntry              `json:"ld_so_conf"`               // ld.so.conf{,.d} library dirs under a writable path
+	EnvPreload             []StartupScript            `json:"env_preload"`              // global env files setting LD_PRELOAD / writable LD_LIBRARY_PATH
+	SuidBinaries           []FileEntry                `json:"suid_binaries"`            // SUID shell-escape/interpreter binaries (GTFOBins privesc)
+	WritablePersistence    []WritablePersistenceEntry `json:"writable_persistence"`     // root-executed config files/dirs writable by a non-root principal
+	DangerousCapabilities  []FileEntry                `json:"dangerous_capabilities"`   // binaries with a privesc file capability (Caps = decoded names)
+	CronPathHijack         []string                   `json:"cron_path_hijack"`         // cron PATH= lines with a writable/relative dir
+	NsswitchUnusual        []string                   `json:"nsswitch_unusual"`         // nsswitch.conf modules outside the standard set (libnss backdoor)
+	ProcMountHides         []string                   `json:"proc_mount_hides"`         // bind mounts over /proc/<pid> (process-hiding rootkit)
+	SysctlHardeningOff     []string                   `json:"sysctl_hardening_off"`     // sysctl config disabling a hardening control (ptrace_scope=0, ...)
+	UnverifiedRepos        []string                   `json:"unverified_repos"`         // pkg repos accepting unsigned packages (apt trusted=yes / dnf gpgcheck=0)
+	SshTunnels             []string                   `json:"ssh_tunnels"`              // live ssh client tunnels (-D SOCKS / -R / persistent -N -f)
+	InitramfsHooks         []StartupScript            `json:"initramfs_hooks"`          // initramfs/dracut hook with a cradle (boot-time persistence)
+	K8sStaticPods          []StartupScript            `json:"k8s_static_pods"`          // non-standard privileged/host* static pod manifests (k8s persistence)
+	ExposedKubeconfigs     []string                   `json:"exposed_kubeconfigs"`      // kubeconfig/admin.conf with creds, readable by non-root
+	PromiscInterfaces      []string                   `json:"promisc_interfaces"`       // non-virtual NICs in promiscuous mode (sniffer); bridges/taps filtered
+	OutOfTreeModules       []string                   `json:"out_of_tree_modules"`      // taint/out-of-tree dmesg loads, minus legit DKMS (zfs/nvidia/vbox/...)
+	ShellHistoryTampering  []StartupScript            `json:"shell_history_tampering"`  // shell rc disabling history (HISTFILE=/dev/null, HISTSIZE=0, unset)
+	TamperedLogs           []string                   `json:"tampered_logs"`            // /var/log files replaced by a symlink (e.g. to /dev/null)
+	SuspiciousShells       []string                   `json:"suspicious_shells"`        // accounts whose login shell is an interpreter or under a writable path
+	WritableSuid           []FileEntry                `json:"writable_suid"`            // SUID/SGID binaries also writable by group/other (trivial privesc)
+	XdgAutostart           []StartupScript            `json:"xdg_autostart"`            // XDG autostart .desktop entries with a cradle/writable Exec
+	SshClientCommands      []StartupScript            `json:"ssh_client_commands"`      // ssh_config LocalCommand / cradle ProxyCommand (exec on connect)
+	LibVersions            []LibVersion               `json:"lib_versions"`             // versions of key shared libraries (supply-chain)
+	SystemdTimers          []SystemdTimer             `json:"systemd_timers"`           // .timer units with the ExecStart of the service they activate (time-triggered persistence)
+	SelinuxDisabled        []string                   `json:"selinux_disabled"`         // SELinux turned off where it is installed (/etc/selinux/config or kernel cmdline)
+	DnfPlugins             []DnfPlugin                `json:"dnf_plugins"`              // dnf/yum plugin files writable by a non-root user (runs as root every transaction)
+	Facts                  map[string]any             `json:"facts"`
+	CollectorErrors        []string                   `json:"collector_errors"`
 }
 
 type HostInfo struct {
@@ -148,19 +153,23 @@ type HostInfo struct {
 }
 
 type Process struct {
-	PID          int       `json:"pid"`
-	PPID         int       `json:"ppid"`
-	UID          int       `json:"uid"`
-	Comm         string    `json:"comm"`
-	Exe          string    `json:"exe"`
-	ExeDeleted   bool      `json:"exe_deleted"`
-	ExeMemfd     bool      `json:"exe_memfd"`
-	Cmdline      string    `json:"cmdline"`
-	Cwd          string    `json:"cwd"`
-	EnvironEmpty bool      `json:"environ_empty"` // /proc/PID/environ wiped (BPFDoor anti-forensics)
-	PacketSocket bool      `json:"packet_socket"` // holds an AF_PACKET (raw) socket — a sniffer
-	StartTime    time.Time `json:"start_time,omitempty"`
-	Listening    []Socket  `json:"listening,omitempty"`
+	PID          int    `json:"pid"`
+	PPID         int    `json:"ppid"`
+	UID          int    `json:"uid"`
+	Comm         string `json:"comm"`
+	Exe          string `json:"exe"`
+	ExeDeleted   bool   `json:"exe_deleted"`
+	ExeMemfd     bool   `json:"exe_memfd"`
+	Cmdline      string `json:"cmdline"`
+	Cwd          string `json:"cwd"`
+	EnvironEmpty bool   `json:"environ_empty"` // /proc/PID/environ wiped (BPFDoor anti-forensics)
+	PacketSocket bool   `json:"packet_socket"` // holds an AF_PACKET (raw) socket — a sniffer
+	// Libraries the process has loaded that a rule can act on. Sampled, not exhaustive.
+	MappedLibsWritable []string  `json:"mapped_libs_writable"` // executable mappings under /tmp, /var/tmp, /dev/shm
+	MappedLibsDeleted  []string  `json:"mapped_libs_deleted"`  // executable mappings of deleted files outside system dirs
+	PreloadEnv         string    `json:"preload_env"`          // LD_PRELOAD/LD_AUDIT naming a non-system library
+	StartTime          time.Time `json:"start_time,omitempty"`
+	Listening          []Socket  `json:"listening,omitempty"`
 }
 
 type Socket struct {
@@ -272,6 +281,21 @@ type Account struct {
 	GID   int    `json:"gid"`
 	Home  string `json:"home"`
 	Shell string `json:"shell"`
+	// From /etc/shadow, readable only as root: the hash scheme, and a short fingerprint
+	// of a usable hash for spotting one copied across hosts. The hash itself never leaves
+	// the host. Empty when shadow could not be read.
+	PasswordScheme      string `json:"password_scheme"`
+	PasswordFingerprint string `json:"password_fingerprint"`
+}
+
+// PrivateKeyFile is an SSH private key found on disk. Only its description is kept.
+type PrivateKeyFile struct {
+	Path      string `json:"path"`
+	Owner     string `json:"owner"`
+	Type      string `json:"type"`
+	Mode      string `json:"mode"`
+	Encrypted bool   `json:"encrypted"`  // passphrase-protected
+	PubSHA256 string `json:"pub_sha256"` // matches AuthKey.SHA256 when the public half is recoverable
 }
 
 // SudoRule is a notable line from /etc/sudoers(.d): NOPASSWD, SETENV, or a
@@ -339,6 +363,20 @@ type FileEntry struct {
 	Tool   string `json:"tool"` // matched offensive-tool marker (pspy/linpeas/chisel/...), "" if none
 }
 
+// WritablePersistenceEntry is a root-executed config file or directory that a non-root
+// principal can write, together with *how* — which is the whole judgement, and the part
+// a bare path threw away. "other" means every account on the host can edit a file that
+// runs as root. "group" means one named non-root group can, which is how push-deploy and
+// config-management setups are meant to work. Both are worth surfacing; only one of them
+// is somebody's deployment model.
+type WritablePersistenceEntry struct {
+	Path  string `json:"path"`
+	Via   string `json:"via"`   // "other" (world-writable) or "group"
+	Group string `json:"group"` // owning group when Via is "group", else ""
+	Mode  string `json:"mode"`
+	Dir   bool   `json:"dir"`
+}
+
 // ModprobeCommand is an /etc/modprobe.d install/remove directive whose command
 // is not a benign modprobe/true/false control — i.e. an arbitrary command run as
 // root when a module is (un)loaded, a classic event-triggered persistence vector.
@@ -383,11 +421,25 @@ type WebServerModule struct {
 // trigger on packets (xdp/socket_filter/sched_cls for packet-activated C2).
 // Enumerating loaded programs catches these even when nothing is pinned.
 type BpfProg struct {
-	ID   uint32 `json:"id"`
-	Type string `json:"type"`           // human program type: kprobe, tracing, xdp, sched_cls, ...
-	Name string `json:"name"`           // program name (<=16 bytes, from BTF/ELF), often empty
-	Tag  string `json:"tag"`            // 8-byte instruction hash (hex), stable per program
-	GPL  bool   `json:"gpl_compatible"` // licensed GPL (required for many tracing helpers)
+	CreatedByUID   uint32          `json:"created_by_uid"`
+	LoadTimeNS     uint64          `json:"load_time_ns"` // kernel monotonic time, not wall time
+	XlatedBytes    uint32          `json:"xlated_bytes"`
+	JitedBytes     uint32          `json:"jited_bytes"`
+	Holders        []BpfHolder     `json:"holders,omitempty"` // holders, not necessarily original loaders
+	Attachments    json.RawMessage `json:"attachments,omitempty"`
+	EvidenceErrors []string        `json:"evidence_errors,omitempty"`
+	EvidenceStatus string          `json:"evidence_status,omitempty"`
+	ID             uint32          `json:"id"`
+	Type           string          `json:"type"`           // human program type: kprobe, tracing, xdp, sched_cls, ...
+	Name           string          `json:"name"`           // program name (<=16 bytes, from BTF/ELF), often empty
+	Tag            string          `json:"tag"`            // 8-byte instruction hash (hex), stable per program
+	GPL            bool            `json:"gpl_compatible"` // licensed GPL (required for many tracing helpers)
+}
+
+type BpfHolder struct {
+	PID    int    `json:"pid"`
+	Exe    string `json:"exe"`
+	Cgroup string `json:"cgroup"`
 }
 
 // LibVersion is the version of a key shared library, for supply-chain checks

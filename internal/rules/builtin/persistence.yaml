@@ -253,12 +253,19 @@ score: 80
 mitre: ["T1543", "T1053.003"]
 # A systemd unit / cron / sudoers.d / init script writable by a non-root user
 # lets that user inject commands that run as root. Collector keeps only files
-# that are other-writable or group-writable by a non-root group.
+# that are other-writable or group-writable by a non-root group, and says which:
+# `via` is "other" (every account on the host) or "group" (one named group, which
+# is how push-deploy is meant to work). The rule fires on both — deciding between
+# them needs context a snapshot doesn't have — but the evidence carries the
+# difference so triage and the risk model can weigh it.
 foreach: writable_persistence
-when: 'item != ""'
+when: 'item.path != ""'
 evidence:
-  path: item
-dedup: ["item"]
+  path: item.path
+  via: item.via
+  group: item.group
+  mode: item.mode
+dedup: ["item.path"]
 ---
 id: xdg-autostart-suspicious
 title: "XDG autostart entry runs a cradle / writable-path command (GUI login persistence)"

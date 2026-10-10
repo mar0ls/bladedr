@@ -259,6 +259,7 @@ func transportFactory(ctx context.Context, st store.Store, crypto *secrets.Crypt
 			return nil, fmt.Errorf("no probe binary configured for arch %q (set BLADEDR_PROBE_LINUX_%s)", arch, strings.ToUpper(arch))
 		}
 		t := scan.NewSSHTransport(h.Hostname, net.JoinHostPort(h.PrimaryIP, strconv.Itoa(h.SSHPort)), cred.Username, auth, bin)
+		t.SudoPassword = sudoPasswordFor(crypto, cred, secret)
 		t.ExpectedHostKey = h.SSHHostKey
 		t.OnLearnHostKey = func(key string) { // TOFU: pin on first contact
 			h.SSHHostKey = key
@@ -266,6 +267,22 @@ func transportFactory(ctx context.Context, st store.Store, crypto *secrets.Crypt
 		}
 		return t, nil
 	}
+}
+
+// sudoPasswordFor returns the password escalation should try: the dedicated sudo
+// password when one was stored, otherwise the login password of a password account, or
+// "" (passwordless sudo only) for a key account that has neither.
+func sudoPasswordFor(crypto *secrets.Crypto, cred *store.Credential, loginSecret []byte) string {
+	if len(cred.SudoSecretEnc) > 0 {
+		if pw, err := crypto.Open(cred.SudoSecretEnc); err == nil {
+			return string(pw)
+		}
+		log.Printf("warning: credential %s: sudo password could not be decrypted", cred.ID)
+	}
+	if cred.AuthType == "password" {
+		return string(loginSecret)
+	}
+	return ""
 }
 
 // bootstrapAdmin creates the initial admin account on a fresh install (no users).
@@ -324,12 +341,14 @@ func openStore(ctx context.Context) store.Store {
 			log.Fatalf("connect postgres: %v", err)
 		}
 		pg.SelfApprovalPolicy = policy
+		pg.ReopenAfter = reopenAfter()
 		log.Printf("using PostgreSQL store")
 		return pg
 	}
 	log.Printf("using in-memory store (set BLADEDR_DATABASE_URL for Postgres)")
 	mem := store.NewMemory()
 	mem.SelfApprovalPolicy = policy
+	mem.ReopenAfter = reopenAfter()
 	return mem
 }
 
@@ -479,11 +498,7 @@ func sensorTransportFactory(ctx context.Context, st store.Store, crypto *secrets
 		t := scan.NewSSHTransport(h.Hostname, net.JoinHostPort(h.PrimaryIP, strconv.Itoa(h.SSHPort)), cred.Username, auth, probeBins[arch])
 		t.ExpectedHostKey = h.SSHHostKey
 		t.OnLearnHostKey = func(key string) { h.SSHHostKey = key; _ = st.UpdateHost(ctx, h) }
-		pw := ""
-		if cred.AuthType == "password" {
-			pw = string(secret)
-		}
-		return t, pw, nil
+		return t, sudoPasswordFor(crypto, cred, secret), nil
 	}
 }
 
@@ -620,6 +635,25 @@ func env(key, def string) string {
 
 // envBool reads an opt-in flag. Only "1" and "true" enable it; anything else,
 // including a typo, leaves the safer default in place.
+// reopenAfter is how long a closed finding must go unseen before its return reopens it,
+// from BLADEDR_REOPEN_AFTER (a Go duration; "0" or "off" disables). A finding that is
+// present on every scan stays closed — only one that went away and came back reopens.
+func reopenAfter() time.Duration {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv("BLADEDR_REOPEN_AFTER")))
+	switch v {
+	case "":
+		return store.DefaultReopenAfter
+	case "0", "off", "false", "disabled":
+		return 0
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d < 0 {
+		log.Printf("warning: BLADEDR_REOPEN_AFTER=%q is not a duration; using %s", v, store.DefaultReopenAfter)
+		return store.DefaultReopenAfter
+	}
+	return d
+}
+
 func envBool(key string) bool {
 	v := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
 	return v == "1" || v == "true"

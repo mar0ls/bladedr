@@ -36,16 +36,19 @@ func TestLoadDatasetParsesPositives(t *testing.T) {
 	if len(obs) != 3 {
 		t.Fatalf("want 3 observations (blank line skipped), got %d", len(obs))
 	}
+	if obs[0].ScanID != "suid-writable" || obs[2].ScanID != "benign-sysctl-dev" {
+		t.Fatalf("technique identifiers must survive loading for grouped validation: %+v", obs)
+	}
 	for _, o := range obs {
 		if o.Source != "lab" {
 			t.Errorf("source should be lab, got %q", o.Source)
 		}
 	}
 	// The two true_positive records are the positive class; the benign one is negative.
-	if LabelOf(obs[0].Status) != Positive || LabelOf(obs[1].Status) != Positive {
+	if LabelOf(obs[0].Verdict) != Positive || LabelOf(obs[1].Verdict) != Positive {
 		t.Errorf("true_positive records must map to the positive class")
 	}
-	if LabelOf(obs[2].Status) != Negative {
+	if LabelOf(obs[2].Verdict) != Negative {
 		t.Errorf("a false_positive (benign-but-flagged) record must map to the negative class, got %q", obs[2].Status)
 	}
 	if obs[0].RuleID != "suid-in-writable-path" || obs[0].Category != "privilege" {
@@ -56,7 +59,9 @@ func TestLoadDatasetParsesPositives(t *testing.T) {
 	for _, f := range Features(obs[0]) {
 		feats[f] = true
 	}
-	if !feats["rule:suid-in-writable-path"] || !feats["tech:T1548.001"] {
+	// The lab runs the real probe, so its rows must look like probe findings to the
+	// model; a distinct source token would let it learn the data's origin.
+	if !feats["rule:suid-in-writable-path"] || !feats["src:agentless_probe"] || feats["src:lab"] {
 		t.Errorf("lab observation did not produce expected features: %v", feats)
 	}
 	_ = store.ObsAcknowledged
@@ -83,7 +88,7 @@ func TestGeneratedLabDatasetStillParses(t *testing.T) {
 		if o.RuleID == "" || o.Category == "" || o.Severity == "" {
 			t.Fatalf("record %d is missing a structural field: %+v", i, o)
 		}
-		if LabelOf(o.Status) == Unlabeled {
+		if LabelOf(o.Verdict) == Unlabeled {
 			t.Fatalf("record %d has status %q, which supervises nothing", i, o.Status)
 		}
 	}

@@ -33,7 +33,7 @@ misreading:
 | REST API `/api/v1` | See compatibility rules below |
 | Postgres storage + migrations | Forward-only, data-preserving |
 | Auth, RBAC, audit log | Roles, session and token handling |
-| Observations, triage, baseline/drift | Statuses, dedup, `baseline-new-*` |
+| Observations, triage, baseline/drift | Workflow status, independent ML verdict, dedup, `baseline-new-*` |
 | ECS/JSON export | Field mapping |
 | Web console | Behaviour, not markup |
 | `/healthz`, `/readyz`, `/metrics` | Metric names |
@@ -109,12 +109,18 @@ architecture-specific probe and sensor binaries, runs as uid 10001, and has a
 `/readyz`-based healthcheck. Policies stay an operator-mounted bundle at
 `/etc/bladedr/policies` so they can be versioned independently.
 
-Current gap: the release workflow publishes binaries but not the image, and there is no
-Docker Hub repository wired up yet.
+The release workflow publishes both binaries and the multi-architecture image after
+the detection and build gates pass. Before cutting 1.0, align the image aliases with
+the list above and verify the complete release from a release-candidate tag.
 
 ## Scope freeze
 
-From here to v1.0.0, changes are limited to:
+The v1.0.0 scope also includes the approved risk-scoring work: instance features,
+grouped validation, fleet-label sufficiency, and evidence-backed triage. Read
+[ML validation](ml-validation.md) for the acceptance protocol. ML readiness is judged
+by independent validation, rather than by a release deadline.
+
+Other changes remain limited to:
 
 bug fixes · security fixes · false-positive tuning · detection tests · upgrade and
 restore tests · documentation · packaging and release automation · UX fixes · API

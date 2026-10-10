@@ -68,3 +68,21 @@ evidence:
   name: item.name
   uid: item.uid
 dedup: ["string(item.uid)", "item.name"]
+---
+id: weak-password-hash-scheme
+title: "Login account protected by a weak password hash (MD5-crypt or DES)"
+category: credential
+severity: medium
+score: 45
+mitre: ["T1110.002", "T1003.008"]
+# md5crypt and DES crypt(3) fall to commodity GPU cracking in minutes to hours; a copy of
+# /etc/shadow then yields the passwords. Accounts that cannot log in (nologin, locked) are
+# not a risk worth reporting. Needs root to read /etc/shadow, so unprivileged scans see none.
+foreach: accounts
+when: >
+  (item.password_scheme == "md5crypt" || item.password_scheme == "des") &&
+  !item.shell.endsWith("nologin") && !item.shell.endsWith("false")
+evidence:
+  account: item.name
+  scheme: item.password_scheme
+dedup: ["item.name"]

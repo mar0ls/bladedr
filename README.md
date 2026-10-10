@@ -35,7 +35,8 @@ See [DESIGN.md](DESIGN.md) for architecture and trust-boundary details.
   policies, maps hits to observations, posts them to the server. Deployed over SSH,
   runs as a systemd unit.
 - **bladectl** — script-friendly API client: `login`, `hosts`, `scans`, `findings`,
-  `responses`. Reads `BLADEDR_SERVER_URL` and `BLADEDR_TOKEN`.
+  `responses`. Reads `BLADEDR_SERVER_URL` and `BLADEDR_TOKEN`; `login` also takes the password from
+  `BLADEDR_PASSWORD` so it need not appear on a command line.
 
 Scanning runs over SSH: sealed credential store, `SSHTransport` in
 `internal/scan/ssh.go`, host keys pinned on first use. Rules are YAML + CEL
@@ -128,6 +129,7 @@ A case that fails on exactly one backend means that backend is wrong.
 | `BLADEDR_SENSOR_LINUX_AMD64` | – | linux/amd64 sensor path for server-side deployment |
 | `BLADEDR_SENSOR_LINUX_ARM64` | – | linux/arm64 sensor path for server-side deployment |
 | `BLADEDR_POLICY_DIR` | – | Tetragon policy directory used for sensor deployment |
+| `BLADEDR_INGEST_TOKEN` | – | per-host bearer token the sensor sends events with (set by deployment in the sensor's env file; read by `bladedr-sensor`, not the server) |
 | `BLADEDR_SERVER_URL` | – | control-plane URL reachable from deployed sensors |
 | `BLADEDR_ADMIN_USER` | `admin` | initial administrator username |
 | `BLADEDR_ADMIN_PASSWORD` | (generated) | initial admin password |
@@ -144,6 +146,7 @@ A case that fails on exactly one backend means that backend is wrong.
 | `BLADEDR_EXPORT_WORKERS` | `2` | concurrent export workers, range 1–32 |
 | `BLADEDR_RISK_DATASET` | `poligon/dataset.jsonl` | labelled JSONL dataset; missing file disables lab samples |
 | `BLADEDR_RISK_AUGMENT` | `false` | enable deterministic class balancing for model training |
+| `BLADEDR_REOPEN_AFTER` | `24h` | a closed (false positive / resolved) finding that was absent from a scan and returns after this long reopens; `off` disables |
 | `BLADEDR_RETENTION_OBSERVATIONS` | disabled | observation archive age; minimum `1h` |
 | `BLADEDR_RETENTION_SCANS` | disabled | scan archive age; minimum `1h` |
 | `BLADEDR_RETENTION_AUDIT` | disabled | audit archive age; minimum `1h` |
@@ -155,11 +158,11 @@ The server runs anywhere; scan targets are always Linux (over SSH).
 
 ```sh
 docker run -p 127.0.0.1:8080:8080 \
-  -e BLADEDR_DATABASE_URL=postgres://… -e BLADEDR_NODE_KEY=… mar0ls/bladedr:0.9.0
+  -e BLADEDR_DATABASE_URL=postgres://… -e BLADEDR_NODE_KEY=… mar0ls/bladedr:0.9.2
 ```
 
 That is the whole agentless product: the image carries the probe for linux/amd64 and
-linux/arm64 and uploads it over SSH itself, and the ~85 builtin rules are compiled into
+linux/arm64 and uploads it over SSH itself, and the ~90 builtin rules are compiled into
 the binary. Nothing needs to be cloned from here to scan a host. Two things do come from
 outside the image:
 
@@ -242,26 +245,62 @@ curl -H "$AUTH" -X DELETE ":8080/api/v1/hosts/$HOST_ID/baseline"   # reset; next
 ## Risk scoring
 
 A multinomial Naive Bayes model (`internal/risk`, pure Go) ranks open findings by how
-likely you are to treat them as real. It trains on triage — `acknowledged` = real,
-`false_positive` = noise (`resolved` is excluded, it's ambiguous) — using structural
-features only (rule, category, severity, source, MITRE technique/tactic) plus coarse
-evidence classes (`path:tmp` vs `path:home`, `uid:root`), never attacker-controlled
-paths. So it learns techniques, not literal IOCs. It ranks; it does not detect.
+likely they are to be confirmed as actionable. Training uses the independent
+`verdict` field: `true_positive` or `false_positive`. `unknown` is excluded.
+Workflow status (`open`, `acknowledged`, `resolved`, `false_positive`) does not
+provide a training label. The model uses structural
+features only: the rule, where the finding came from, and the shape of the artifact
+(`path:tmp` vs `path:home`, `exe:system`, `uid:root`, a hidden path component, a
+world-readable private key, …), never attacker-controlled names or paths. Category,
+severity and MITRE tags are not features: the rule fixes them, and counting them as well
+counted the rule several times over. The class prior is flat, so a finding the model has
+no evidence about scores 50 rather than the labelled set's own balance. It learns
+techniques, not literal IOCs. It ranks; it does not detect.
 
-`/risk/stats` cross-validates (stratified 5-fold) and reports ROC AUC, balanced accuracy,
+`/risk/stats` cross-validates with grouped folds and reports ROC AUC, balanced accuracy,
 precision, recall and Brier score — enough to tell you whether the labelled set is
 big/balanced/separable enough to trust. Each class is loaded independently, up to 5k
 recent observations, so a backlog of untriaged alerts can't crowd out the labels. Until
 both classes exist, scoring falls back to the rule's static score.
 
-It runs seven independent seeded passes and reports the mean **and the spread**, because a
-single split is not a measurement. On the poligon dataset (157 positives, 10 negatives)
-ROC AUC ranged 0.48 to 0.82 across seeds — below chance to respectable, from nothing but
-how the folds fell. A single pass would have reported one of those and, at 0.81, called
-the model trustworthy. So `cv_roc_auc_stddev` above 0.10 marks the figure untrustworthy
-whatever the mean: that spread means the labelled set is too small or too uneven, not that
-the model is good. Fold assignment used to follow the order rows came out of the database,
-which made the metrics a property of insertion order.
+Seven seeded partitions report the mean and spread; they are not independent
+acceptance tests. Lab variants stay together by technique/scene, and fleet
+findings stay together by host. Trust requires at least 30 fleet labels per
+class and passing fleet-only validation, in addition to the model's other gates.
+See [validation](docs/ml-validation.md) for grouping and limitations.
+File-loaded examples never count as fleet labels.
+
+The Findings page applies these actions with one atomic status/verdict update:
+
+| Button | Status | Verdict |
+| --- | --- | --- |
+| Take ownership | acknowledged | unchanged |
+| Confirm finding | acknowledged | true_positive |
+| Close as FP | false_positive | false_positive |
+| Resolved after remediation | resolved | unchanged; requires true_positive |
+| Close inconclusive | resolved | unknown |
+| Reopen | open | unchanged |
+
+`Change assessment` exposes ML-only controls; these do not close findings.
+Closing inconclusive records insufficient evidence, not a clean bill of health.
+Taking ownership tracks investigation; it does not assign a user to the finding.
+Verdict changes require operator/admin access and are audited. Scans preserve
+existing assessments; resolving a confirmed finding keeps its training label.
+
+```sh
+curl -H "$AUTH" -H 'Content-Type: application/json' -X PATCH \
+  ":8080/api/v1/observations/$OBS_ID" -d '{"verdict":"true_positive"}'
+```
+
+For a combined action send `{"action":"close_false_positive"}`. Do not mix
+`action`, `status` and `verdict` in a PATCH. Legacy status and bulk requests map
+to these same actions: false_positive also writes the negative verdict; resolved
+requires a positive verdict; open and acknowledged preserve assessment.
+Bulk updates are best-effort and return the number updated; rejected rows remain
+unchanged. Migration 0010 sets old
+verdicts to `unknown`; review historical decisions before relabelling them.
+BPF evidence collection and its limits are described in
+[BPF evidence](docs/bpf-evidence.md).
 
 `BLADEDR_RISK_AUGMENT` oversamples the minority class, but only when fitting the
 scorer — the CV folds stay on real observations. Augmenting before the split would put
@@ -443,11 +482,18 @@ runs it, and leaves nothing behind. The probe reads a `/proc` snapshot, evaluate
 rules locally and prints JSON. Root widens what it can collect but isn't required.
 Tetragon is the only thing that stays resident, and only on hosts you opt in.
 
-The probe is cached under its sha256 so repeat scans skip the upload, which makes that
-cache path worth guarding: `/tmp` is world-writable, so the staging dir is required to
-be 0700 and owned by the scan account (checked without following symlinks), and a
-cached binary is re-hashed before it runs. Anything that doesn't verify gets
-re-uploaded instead of trusted.
+A non-root scan account runs the probe through sudo when it may: passwordless sudo, or
+`sudo -S` with the host's stored sudo password (for a password credential, its login
+password when no sudo password is set). Without root the probe cannot open `/dev/kmsg` or read other users' processes, and the
+scan comes back `partial`. An account with no sudo rights still gets that unprivileged
+scan; the check uses `sudo -l`, so it logs no sudoers incident. Under sudo the probe
+and rule bundle are first copied into a root-owned temp dir and re-hashed there, so
+whoever holds the scan account — without its sudo password — cannot swap the cached
+binary and be handed root by the next scan.
+
+The probe is cached under its sha256 so repeat scans skip the upload. Each scan removes
+probes of other versions and leftover rule bundles older than an hour, so the cache holds
+one probe (about 17 MB), not one per release.
 
 The probe is cached under its content hash so scheduled scans skip the multi-MB
 upload. On a host that may already be compromised that cache is a code-execution

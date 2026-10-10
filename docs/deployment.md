@@ -22,6 +22,37 @@ are tracked in `schema_migrations`, so upgrades are just "deploy the new binary 
 restart". Without `BLADEDR_DATABASE_URL` the server keeps everything in memory and
 loses it on restart — fine for a demo, not for production.
 
+## Upgrade with observation verdicts (migration 0010)
+
+Back up Postgres and keep the previous server image before upgrading. Migration
+0010 adds `observations.verdict` and defaults historical rows to `unknown`.
+Workflow statuses and alert IDs are unchanged. Legacy status and bulk updates use
+the same transitions as the console: false_positive writes a negative verdict,
+resolved requires a positive verdict, open/acknowledged preserve assessment.
+Bulk requests return an updated count; rejected rows remain unchanged.
+The console's `Close as FP` and `Confirm
+finding` actions update status and verdict atomically. `Close inconclusive` closes
+without a training label. `Resolved after remediation` requires a positive verdict.
+These actions use the existing columns; no migration beyond 0010 is needed.
+
+## Upgrade notes (migrations 0011, 0012)
+
+Both are additive. 0011 adds `credentials.sudo_secret_enc` (null until you enter a sudo
+password for a host); 0012 adds `host_inventory`, which fills in as hosts are scanned, so
+cross-host findings (a key or password hash shared between hosts) appear after every host
+has had one scan on the new version. `BLADEDR_REOPEN_AFTER` (default `24h`, `off` disables)
+controls when a closed finding that vanished and returned reopens.
+
+If previous decisions have been independently verified, export their exact IDs
+and assessments before the upgrade. Restore only those IDs after migration, in a
+transaction with an expected-row-count check. Record this administrative backfill
+in `audit_log`. Do not map all acknowledged findings to true positives.
+
+After startup, check `/readyz`, the migration ledger, verdict counts and a sample
+of both classes. Verify that a workflow-only change leaves the verdict unchanged.
+Run a scan and check that deduplication preserves the verdict. Keep the backup
+outside the repository; it contains credentials and host inventory.
+
 ## Secrets
 
 Generate the node key once and keep it:

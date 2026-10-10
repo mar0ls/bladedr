@@ -67,6 +67,7 @@ func main() {
 		result.CollectedAt = time.Now().UTC()
 	}
 	result.StateDigest = probe.BuildStateDigest(snap)
+	result.BpfPrograms = snap.BpfPrograms
 	if *emitSnapshot {
 		result.Snapshot = snap
 	}

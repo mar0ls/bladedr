@@ -4,6 +4,9 @@ import (
 	"net/http"
 	"testing"
 	"time"
+
+	"bladedr/internal/secrets"
+	"bladedr/internal/store"
 )
 
 func TestNewHTTPServerLimits(t *testing.T) {
@@ -27,5 +30,33 @@ func TestNewHTTPServerLimits(t *testing.T) {
 	}
 	if server.MaxHeaderBytes != 1<<20 {
 		t.Errorf("MaxHeaderBytes = %d, want %d", server.MaxHeaderBytes, 1<<20)
+	}
+}
+
+func TestSudoPasswordFor(t *testing.T) {
+	_, priv, err := secrets.GenerateKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	crypto, err := secrets.FromNodeKey(priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealed, _ := crypto.Seal([]byte("dedicated"))
+	cases := []struct {
+		name string
+		cred store.Credential
+		want string
+	}{
+		{"dedicated sudo password wins", store.Credential{AuthType: "password", SudoSecretEnc: sealed}, "dedicated"},
+		{"key account with a sudo password", store.Credential{AuthType: "ssh_key", SudoSecretEnc: sealed}, "dedicated"},
+		{"password account falls back to its login password", store.Credential{AuthType: "password"}, "login-pw"},
+		{"key account with none uses passwordless sudo only", store.Credential{AuthType: "ssh_key"}, ""},
+		{"undecryptable sudo secret falls back, not fails", store.Credential{AuthType: "password", SudoSecretEnc: []byte("garbage")}, "login-pw"},
+	}
+	for _, tc := range cases {
+		if got := sudoPasswordFor(crypto, &tc.cred, []byte("login-pw")); got != tc.want {
+			t.Errorf("%s: got %q, want %q", tc.name, got, tc.want)
+		}
 	}
 }

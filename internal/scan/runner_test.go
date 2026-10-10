@@ -146,3 +146,30 @@ func TestRunnerScanTransportFailureMarksUnreachable(t *testing.T) {
 		t.Fatalf("failed scan should mark host %q, got %q", store.StatusUnreachable, got.Status)
 	}
 }
+
+func TestPartialScanRecordsWhatCouldNotBeCollected(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemory()
+	r := &Runner{
+		Store:     st,
+		LoadRules: func(context.Context) ([]rules.Rule, error) { return nil, nil },
+		NewTransport: func(*store.Host) (Transport, error) {
+			return fakeTransport{result: probe.ScanResult{ProbeVersion: "t",
+				CollectorErrors: []string{"kmsg open: operation not permitted", "private key scan: some home directories unreadable"}}}, nil
+		},
+	}
+	host := &store.Host{Hostname: "h"}
+	if err := st.CreateHost(ctx, host); err != nil {
+		t.Fatal(err)
+	}
+	sc, err := r.Scan(ctx, host, store.TriggerManual)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sc.Status != store.ScanPartial {
+		t.Fatalf("status = %q, want partial", sc.Status)
+	}
+	if want := "kmsg open: operation not permitted; private key scan: some home directories unreadable"; sc.Error != want {
+		t.Fatalf("a partial scan must say why: error = %q, want %q", sc.Error, want)
+	}
+}

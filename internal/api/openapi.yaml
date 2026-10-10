@@ -105,7 +105,7 @@ paths:
       responses: {'200': {description: Batch accepted}, '413': {$ref: '#/components/responses/Error'}}
   /api/v1/credentials:
     get: {operationId: listCredentials, responses: {'200': {description: Credential metadata}}}
-    post: {operationId: createCredential, requestBody: {$ref: '#/components/requestBodies/JSON'}, responses: {'201': {description: Credential created}}}
+    post: {operationId: createCredential, description: 'Body fields: name, username, auth_type (ssh_key, password, ssh_agent), secret (write-only), and optional sudo_password (write-only; sealed like the secret and used to run the probe and sensor deployment under sudo). Neither secret is ever returned.', requestBody: {$ref: '#/components/requestBodies/JSON'}, responses: {'201': {description: Credential created}}}
   /api/v1/credentials/{id}:
     parameters: [{$ref: '#/components/parameters/Id'}]
     delete: {operationId: deleteCredential, responses: {'204': {description: Credential deleted}}}
@@ -129,9 +129,24 @@ paths:
   /api/v1/observations/{id}:
     parameters: [{$ref: '#/components/parameters/Id'}]
     get: {operationId: getObservation, responses: {'200': {description: Observation, content: {application/json: {schema: {$ref: '#/components/schemas/Observation'}}}}}}
-    patch: {operationId: triageObservation, requestBody: {$ref: '#/components/requestBodies/JSON'}, responses: {'200': {description: Observation updated}}}
+    patch:
+      operationId: triageObservation
+      description: Status aliases use disposition transitions. false_positive also writes a negative verdict; resolved requires a positive verdict. Open and acknowledged preserve assessment.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - {type: object, required: [action], additionalProperties: false, properties: {action: {type: string, enum: [take_ownership, confirm_finding, close_false_positive, resolve, close_inconclusive, reopen]}}}
+                - {type: object, required: [status], additionalProperties: false, properties: {status: {$ref: '#/components/schemas/ObservationStatus'}}}
+                - {type: object, required: [verdict], additionalProperties: false, properties: {verdict: {type: string, enum: [unknown, true_positive, false_positive]}}}
+      responses:
+        '204': {description: Action applied atomically or independent status/verdict updated}
+        '409': {description: Remediation resolution requires a true_positive verdict}
+        '400': {description: Invalid assessment or combined status and verdict update}
   /api/v1/observations/bulk:
-    post: {operationId: bulkTriageObservations, requestBody: {$ref: '#/components/requestBodies/JSON'}, responses: {'200': {description: Bulk triage result}}}
+    post: {operationId: bulkTriageObservations, description: Best-effort status aliases use the same disposition transitions as PATCH. Rejected rows remain unchanged., requestBody: {$ref: '#/components/requestBodies/JSON'}, responses: {'200': {description: Number of successfully updated findings}}}
   /api/v1/rules:
     get: {operationId: listRules, responses: {'200': {description: User rules}}}
     post: {operationId: createRule, requestBody: {required: true, content: {application/yaml: {schema: {type: string}}, text/yaml: {schema: {type: string}}}}, responses: {'201': {description: Rule created}}}
@@ -396,6 +411,7 @@ components:
         evidence: {type: object, additionalProperties: true}
         dedup_key: {type: string}
         status: {$ref: '#/components/schemas/ObservationStatus'}
+        verdict: {type: string, enum: [unknown, true_positive, false_positive], description: Independent analyst assessment used for ML; workflow status does not label training data.}
         first_seen: {type: string, format: date-time}
         last_seen: {type: string, format: date-time}
         count: {type: integer}

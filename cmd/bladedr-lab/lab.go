@@ -30,8 +30,28 @@ func (t technique) label() string {
 	return "true_positive"
 }
 
+// scene is a set of techniques planted together and scanned once, so their findings
+// share a host the way they would in production. The per-technique loop deliberately
+// scans a host carrying exactly one plant; that answers "does the rule fire" and nothing
+// about what else was true at the time. A scene is how the range produces a row that has
+// siblings — and therefore the only way to find out whether an intrusion tripping four
+// rules is distinguishable from a CI box tripping four.
+type scene struct {
+	ID         string   `yaml:"id"`
+	Label      string   `yaml:"label"`
+	Techniques []string `yaml:"techniques"`
+}
+
+func (s scene) label() string {
+	if s.Label == "false_positive" {
+		return "false_positive"
+	}
+	return "true_positive"
+}
+
 type manifest struct {
 	Techniques []technique `yaml:"techniques"`
+	Scenes     []scene     `yaml:"scenes"`
 }
 
 // covKey identifies one technique+variant scenario in the coverage map.
@@ -51,13 +71,17 @@ type example struct {
 	Severity  string         `json:"severity"`
 	Mitre     []string       `json:"mitre,omitempty"`
 	Source    string         `json:"source"` // always "lab"
-	Label     string         `json:"label"`  // always "true_positive"
+	Label     string         `json:"label"`  // "true_positive" or "false_positive"
 	Evidence  map[string]any `json:"evidence,omitempty"`
+	// Scene and SceneFindings are set only for rows produced by a scene: the scene's id
+	// and how many findings that single scan produced in total. Together they are the
+	// co-occurrence context a one-plant row cannot have.
+	Scene         string `json:"scene,omitempty"`
+	SceneFindings int    `json:"scene_findings,omitempty"`
 }
 
 // observation projects an example onto a store.Observation so the risk model can
-// train on it directly: true_positive => acknowledged (positive class),
-// false_positive => the negative class.
+// train on its explicit ground-truth verdict independently of workflow status.
 func (e example) observation() *store.Observation {
 	status := store.ObsAcknowledged
 	if e.Label == "false_positive" {
@@ -70,6 +94,7 @@ func (e example) observation() *store.Observation {
 		Mitre:    e.Mitre,
 		Source:   e.Source,
 		Status:   status,
+		Verdict:  e.Label,
 		Evidence: e.Evidence,
 	}
 }
@@ -134,4 +159,45 @@ func buildBundle() (probe.RuleBundle, map[string]rules.Rule, error) {
 		}
 	}
 	return probe.RuleBundle{Schema: probe.SchemaRuleBundle, BundleVersion: "lab", Rules: br}, meta, nil
+}
+
+// sceneFindingStats summarises how many findings each class of scene produced. It is the
+// measurement scenes exist for: if an intrusion and a busy-but-legitimate host both trip
+// four rules, then finding density carries no signal and no feature should be built on
+// it. Reporting it every run is the cheapest way to keep that honest.
+func sceneFindingStats(rows []example) (attackMean, benignMean float64, attackScenes, benignScenes int) {
+	type key struct{ scene, variant string }
+	size := map[key]int{}
+	label := map[key]string{}
+	for _, e := range rows {
+		k := key{e.Scene, e.Variant}
+		size[k] = e.SceneFindings
+		label[k] = e.Label
+	}
+	var aSum, bSum int
+	for k, n := range size {
+		if label[k] == "false_positive" {
+			benignScenes++
+			bSum += n
+			continue
+		}
+		attackScenes++
+		aSum += n
+	}
+	if attackScenes > 0 {
+		attackMean = float64(aSum) / float64(attackScenes)
+	}
+	if benignScenes > 0 {
+		benignMean = float64(bSum) / float64(benignScenes)
+	}
+	return attackMean, benignMean, attackScenes, benignScenes
+}
+
+// distinctRules counts how many different rules a set of findings covers.
+func distinctRules(fs []probe.Finding) int {
+	seen := map[string]bool{}
+	for _, f := range fs {
+		seen[f.RuleID] = true
+	}
+	return len(seen)
 }

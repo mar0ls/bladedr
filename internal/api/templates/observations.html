@@ -24,6 +24,7 @@
 {{if .Rows}}
 <div class="toolbar" style="margin-bottom:.7rem">
   <span class="muted" id="selcount">0 selected</span>
+  <span class="faint">Bulk triage — FP also labels; resolution requires confirmed findings</span>
   <select id="bulkstatus">
     <option value="acknowledged">acknowledge</option>
     <option value="resolved">resolve</option>
@@ -44,11 +45,24 @@
       <td>{{.Hostname}}</td>
       <td class="ev">{{.EvidenceStr}}</td>
       <td class="muted">{{.LastSeenStr}}</td>
-      <td class="obs-{{.Status}}">{{.Status}}</td>
+      <td class="obs-{{.Status}}">{{.Status}}<div class="faint">ML: {{if .Verdict}}{{.Verdict}}{{else}}unknown{{end}}</div></td>
       <td class="act">
-        <button onclick="triage('{{.ID}}','acknowledged')">Ack</button>
-        <button onclick="triage('{{.ID}}','resolved')">Resolve</button>
-        <button class="danger" onclick="triage('{{.ID}}','false_positive')">FP</button>
+        {{if or (eq .Status "resolved") (eq .Status "false_positive")}}
+        <button onclick="disposition('{{.ID}}','reopen')">Reopen</button>
+        {{else}}
+        {{if eq .Status "open"}}<button onclick="disposition('{{.ID}}','take_ownership')">Take ownership</button>{{end}}
+        {{if eq .Verdict "true_positive"}}
+        <button onclick="disposition('{{.ID}}','resolve')">Resolved after remediation</button>
+        {{else}}<button onclick="disposition('{{.ID}}','confirm_finding')">Confirm finding</button>{{end}}
+        <button onclick="disposition('{{.ID}}','close_false_positive')">Close as FP</button>
+        <button onclick="disposition('{{.ID}}','close_inconclusive')">Close inconclusive</button>
+        {{end}}
+        <details><summary>Change assessment</summary>
+        <div class="faint">Changes ML assessment only; does not close the finding.</div>
+        <button onclick="assess('{{.ID}}','true_positive')">ML: real finding</button>
+        <button onclick="assess('{{.ID}}','false_positive')">ML: false positive</button>
+        <button onclick="assess('{{.ID}}','unknown')">ML: unknown</button>
+        </details>
       </td>
     </tr>
   {{end}}
@@ -60,10 +74,15 @@
 </div>
 
 <script>
-function triage(id, status){
+function assess(id, verdict){
+  fetch('/api/v1/observations/'+id,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({verdict:verdict})})
+  .then(function(r){if(r.ok){location.reload();}else{alert('assessment failed: HTTP '+r.status);}});
+}
+function disposition(id, action){
+  if(action === 'resolve' && !confirm('Confirm that remediation has been completed.')) return;
   fetch('/api/v1/observations/'+id, {
     method:'PATCH', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({status: status})
+    body: JSON.stringify({action: action})
   }).then(function(r){
     if(r.ok){ location.reload(); } else { alert('triage failed: HTTP '+r.status); }
   });
@@ -80,7 +99,7 @@ function bulkApply(){
     method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({ids: ids, status: status})
   }).then(function(r){ return r.json(); })
-    .then(function(d){ location.reload(); })
+    .then(function(d){ if(d.updated !== ids.length){ alert('Updated '+d.updated+' of '+ids.length+'. Unconfirmed findings cannot be resolved.'); } location.reload(); })
     .catch(function(){ alert('bulk action failed'); });
 }
 </script>

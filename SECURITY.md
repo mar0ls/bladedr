@@ -66,6 +66,22 @@ without following symlinks, and a cached binary is verified by SHA-256 before it
 Anything unverifiable gets re-uploaded rather than trusted. If you find a way for an
 unprivileged local account to influence which binary a scan executes, that's in scope.
 
+## Credentials the probe sees
+
+To find a key or a password hash shared across hosts the probe reads `/etc/shadow` and the
+private keys under home directories. Neither leaves the host. For each key the server gets a
+SHA-256 of the *public* key (the value `authorized_keys` entries are hashed to), the key
+type, the file path, its mode and whether it has a passphrase. For each account it gets the
+hash *scheme* (`sha512crypt`, `md5crypt`, …) and a 16-hex-character SHA-256 fingerprint of
+the hash string; the hash cannot be recovered from it and it is not usable to authenticate.
+The sudo password you may store with a host's credential is sealed with the node key like
+the SSH secret, is never returned by the API, and is used only to run the probe and the
+sensor deployment under `sudo`.
+
+The path to watch is the inventory itself: it tells whoever can read the database which
+hosts share a key and which accounts share a password, even though it holds no secret. Treat
+database access as access to that map.
+
 ## Build and release
 
 The published image is the thing operators run with SSH access to their fleet, so what

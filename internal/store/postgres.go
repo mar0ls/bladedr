@@ -18,6 +18,9 @@ import (
 type Postgres struct {
 	pool *pgxpool.Pool
 	SelfApprovalPolicy
+	// ReopenAfter reopens a closed finding that returns after this long unseen; zero
+	// disables it.
+	ReopenAfter time.Duration
 }
 
 // OpenPostgres connects and verifies the pool. Schema must already be applied
@@ -31,7 +34,7 @@ func OpenPostgres(ctx context.Context, dsn string) (*Postgres, error) {
 		pool.Close()
 		return nil, err
 	}
-	p := &Postgres{pool: pool}
+	p := &Postgres{pool: pool, ReopenAfter: DefaultReopenAfter}
 	if err := p.migrate(ctx); err != nil {
 		pool.Close()
 		return nil, err
@@ -147,28 +150,28 @@ func (p *Postgres) CreateCredential(ctx context.Context, c *Credential) error {
 		c.CreatedAt = time.Now().UTC()
 	}
 	_, err := p.pool.Exec(ctx, `
-		INSERT INTO credentials (id, name, username, auth_type, secret_enc, created_at)
-		VALUES ($1,$2,$3,$4,$5,$6)`,
-		c.ID, c.Name, c.Username, c.AuthType, c.SecretEnc, c.CreatedAt)
+		INSERT INTO credentials (id, name, username, auth_type, secret_enc, sudo_secret_enc, created_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+		c.ID, c.Name, c.Username, c.AuthType, c.SecretEnc, nilIfEmpty(c.SudoSecretEnc), c.CreatedAt)
 	return err
 }
 
 func scanCred(row rowScanner) (*Credential, error) {
 	var c Credential
-	if err := row.Scan(&c.ID, &c.Name, &c.Username, &c.AuthType, &c.SecretEnc, &c.CreatedAt); err != nil {
+	if err := row.Scan(&c.ID, &c.Name, &c.Username, &c.AuthType, &c.SecretEnc, &c.SudoSecretEnc, &c.CreatedAt); err != nil {
 		return nil, err
 	}
 	return &c, nil
 }
 
 func (p *Postgres) GetCredential(ctx context.Context, id string) (*Credential, error) {
-	row := p.pool.QueryRow(ctx, `SELECT id, name, username, auth_type, secret_enc, created_at FROM credentials WHERE id=$1`, id)
+	row := p.pool.QueryRow(ctx, `SELECT id, name, username, auth_type, secret_enc, sudo_secret_enc, created_at FROM credentials WHERE id=$1`, id)
 	c, err := scanCred(row)
 	return c, notFound(err, "credential", id)
 }
 
 func (p *Postgres) ListCredentials(ctx context.Context) ([]*Credential, error) {
-	rows, err := p.pool.Query(ctx, `SELECT id, name, username, auth_type, secret_enc, created_at FROM credentials ORDER BY created_at`)
+	rows, err := p.pool.Query(ctx, `SELECT id, name, username, auth_type, secret_enc, sudo_secret_enc, created_at FROM credentials ORDER BY created_at`)
 	if err != nil {
 		return nil, err
 	}
@@ -404,9 +407,12 @@ func (p *Postgres) FailScanJob(ctx context.Context, id, workerID, message string
 // --- observations ---
 
 const obsCols = `id, host_id, scan_id, source, rule_id, category, title, severity, score,
-	mitre, evidence, dedup_key, status, first_seen, last_seen, count`
+	mitre, evidence, dedup_key, status, first_seen, last_seen, count, verdict`
 
 func (p *Postgres) UpsertObservation(ctx context.Context, o *Observation) (*Observation, error) {
+	if o.Verdict == "" {
+		o.Verdict = "unknown"
+	}
 	if o.ID == "" {
 		o.ID = uuid.NewString()
 	}
@@ -420,16 +426,23 @@ func (p *Postgres) UpsertObservation(ctx context.Context, o *Observation) (*Obse
 	defer tx.Rollback(ctx) //nolint:errcheck
 	row := tx.QueryRow(ctx, `
 		INSERT INTO observations (id, host_id, scan_id, source, rule_id, category, title,
-		  severity, score, mitre, evidence, evidence_text, dedup_key, status)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+		  severity, score, mitre, evidence, evidence_text, dedup_key, status, verdict)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
 		ON CONFLICT (host_id, dedup_key) DO UPDATE SET
+		  status = CASE WHEN $16::float8 > 0 AND observations.status IN ('false_positive','resolved')
+		                 AND observations.last_seen <= now() - make_interval(secs => $16::float8)
+		                 AND observations.last_seen < (SELECT max(started_at) FROM scans
+		                      WHERE host_id = observations.host_id AND status IN ('ok','partial')
+		                        AND ($3::uuid IS NULL OR id <> $3::uuid))
+		                THEN 'open' ELSE observations.status END,
 		  last_seen = now(), count = observations.count + 1, score = EXCLUDED.score,
 		  severity = EXCLUDED.severity, evidence = EXCLUDED.evidence,
 		  evidence_text = EXCLUDED.evidence_text, scan_id = EXCLUDED.scan_id
 		RETURNING `+obsCols,
 		o.ID, o.HostID, nullUUID(o.ScanID), o.Source, o.RuleID, nullStr(o.Category),
 		nullStr(o.Title), o.Severity, o.Score, mustJSON(o.Mitre, "[]"),
-		mustJSON(o.Evidence, "{}"), flattenEvidence(o.Title, o.Evidence), o.DedupKey, o.Status)
+		mustJSON(o.Evidence, "{}"), flattenEvidence(o.Title, o.Evidence), o.DedupKey, o.Status, o.Verdict,
+		p.ReopenAfter.Seconds())
 	stored, err := scanObs(row)
 	if err != nil {
 		return nil, err
@@ -450,7 +463,7 @@ func scanObs(row rowScanner) (*Observation, error) {
 	var mitre, evidence []byte
 	if err := row.Scan(&o.ID, &o.HostID, &scanID, &o.Source, &o.RuleID, &category, &title,
 		&o.Severity, &o.Score, &mitre, &evidence, &o.DedupKey, &o.Status,
-		&o.FirstSeen, &o.LastSeen, &o.Count); err != nil {
+		&o.FirstSeen, &o.LastSeen, &o.Count, &o.Verdict); err != nil {
 		return nil, err
 	}
 	o.ScanID = deref(scanID)
@@ -470,6 +483,9 @@ func (p *Postgres) ListObservations(ctx context.Context, f ObservationFilter) ([
 	}
 	if f.HostID != "" {
 		add("host_id = $%d", f.HostID)
+	}
+	if f.Verdict != "" {
+		add("verdict = $%d", f.Verdict)
 	}
 	if f.Severity != "" {
 		add("severity = $%d", f.Severity)
@@ -530,6 +546,38 @@ func (p *Postgres) GetObservation(ctx context.Context, id string) (*Observation,
 
 func (p *Postgres) SetObservationStatus(ctx context.Context, id, status string) error {
 	ct, err := p.pool.Exec(ctx, `UPDATE observations SET status=$2 WHERE id=$1`, id, status)
+	if err != nil {
+		return err
+	}
+	if ct.RowsAffected() == 0 {
+		return ErrNotFound{"observation", id}
+	}
+	return nil
+}
+
+func (p *Postgres) ApplyObservationAction(ctx context.Context, id, action string) error {
+	status, verdict, err := ObservationDisposition(action)
+	if err != nil {
+		return err
+	}
+	ct, err := p.pool.Exec(ctx, `UPDATE observations SET status=$2, verdict=CASE WHEN $3='' THEN verdict ELSE $3 END WHERE id=$1 AND ($4 <> 'resolve' OR verdict='true_positive')`, id, status, verdict, action)
+	if err != nil {
+		return err
+	}
+	if ct.RowsAffected() == 0 {
+		if _, err := p.GetObservation(ctx, id); err != nil {
+			return err
+		}
+		return ErrDisposition
+	}
+	return nil
+}
+
+func (p *Postgres) SetObservationVerdict(ctx context.Context, id, verdict string) error {
+	if verdict != "unknown" && verdict != "true_positive" && verdict != "false_positive" {
+		return fmt.Errorf("invalid verdict")
+	}
+	ct, err := p.pool.Exec(ctx, `UPDATE observations SET verdict=$2 WHERE id=$1`, id, verdict)
 	if err != nil {
 		return err
 	}
@@ -835,6 +883,33 @@ func (p *Postgres) ListBaselines(ctx context.Context) ([]*Baseline, error) {
 		}
 		_ = json.Unmarshal(digest, &b.Digest)
 		out = append(out, &b)
+	}
+	return out, rows.Err()
+}
+
+func (p *Postgres) SaveInventory(ctx context.Context, inv *Inventory) error {
+	_, err := p.pool.Exec(ctx, `
+		INSERT INTO host_inventory (host_id, items, updated_at) VALUES ($1,$2,now())
+		ON CONFLICT (host_id) DO UPDATE SET items=EXCLUDED.items, updated_at=now()`,
+		inv.HostID, mustJSON(inv.Items, "{}"))
+	return err
+}
+
+func (p *Postgres) ListInventories(ctx context.Context) ([]*Inventory, error) {
+	rows, err := p.pool.Query(ctx, `SELECT host_id, items, updated_at FROM host_inventory`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*Inventory
+	for rows.Next() {
+		var inv Inventory
+		var items []byte
+		if err := rows.Scan(&inv.HostID, &items, &inv.UpdatedAt); err != nil {
+			return nil, err
+		}
+		_ = json.Unmarshal(items, &inv.Items)
+		out = append(out, &inv)
 	}
 	return out, rows.Err()
 }
@@ -1579,4 +1654,12 @@ func (p *Postgres) DeleteExpiredSessions(ctx context.Context) (int, error) {
 		return 0, err
 	}
 	return int(ct.RowsAffected()), nil
+}
+
+// nilIfEmpty stores an absent sealed secret as NULL rather than an empty bytea.
+func nilIfEmpty(b []byte) []byte {
+	if len(b) == 0 {
+		return nil
+	}
+	return b
 }

@@ -82,7 +82,11 @@ func runStoreContract(t *testing.T, open newStore) {
 		run  func(*testing.T, context.Context, Store)
 	}{
 		{"HostRoundTrip", contractHostRoundTrip},
+		{"CredentialSudoSecret", contractCredentialSudoSecret},
+		{"HostInventoryReplaces", contractHostInventory},
+		{"ClosedFindingReopensWhenItReturns", contractReopenOnReturn},
 		{"ObservationDedup", contractObservationDedup},
+		{"ObservationVerdict", contractObservationVerdict},
 		{"ObservationCursorPagination", contractObservationCursor},
 		{"ScanJobClaimIsExclusive", contractScanJobClaimExclusive},
 		{"ScanJobLeaseReclaim", contractScanJobLeaseReclaim},
@@ -104,6 +108,60 @@ func runStoreContract(t *testing.T, open newStore) {
 }
 
 // --- helpers ---
+
+func contractObservationVerdict(t *testing.T, ctx context.Context, s Store) {
+	h := mustHost(t, ctx, s)
+	o := mustObs(t, ctx, s, h.ID, "assessment", time.Now())
+	if o.Verdict != "unknown" {
+		t.Fatal("default verdict must be unknown")
+	}
+	if err := s.SetObservationStatus(ctx, o.ID, ObsAcknowledged); err != nil {
+		t.Fatal(err)
+	}
+	rows, _ := s.ListObservations(ctx, ObservationFilter{Verdict: "true_positive"})
+	if len(rows) != 0 {
+		t.Fatal("ack must not label")
+	}
+	if err := s.SetObservationVerdict(ctx, o.ID, "true_positive"); err != nil {
+		t.Fatal(err)
+	}
+	mustObs(t, ctx, s, h.ID, "assessment", time.Now())
+	if err := s.SetObservationStatus(ctx, o.ID, ObsResolved); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.GetObservation(ctx, o.ID)
+	if err != nil || got.Verdict != "true_positive" {
+		t.Fatalf("assessment lost: %v %v", got, err)
+	}
+	rows, err = s.ListObservations(ctx, ObservationFilter{Verdict: "true_positive"})
+	if err != nil || len(rows) != 1 {
+		t.Fatal("verdict filter failed", err)
+	}
+	if err := s.SetObservationVerdict(ctx, o.ID, "invalid"); err == nil {
+		t.Fatal("invalid verdict accepted")
+	}
+	for _, tc := range []struct{ action, status, verdict string }{
+		{"close_false_positive", ObsFalsePositive, "false_positive"},
+		{"reopen", ObsOpen, "false_positive"},
+		{"confirm_finding", ObsAcknowledged, "true_positive"},
+		{"resolve", ObsResolved, "true_positive"},
+		{"close_inconclusive", ObsResolved, "unknown"},
+	} {
+		if err := s.ApplyObservationAction(ctx, o.ID, tc.action); err != nil {
+			t.Fatal(err)
+		}
+		got, err := s.GetObservation(ctx, o.ID)
+		if err != nil || got.Status != tc.status || got.Verdict != tc.verdict {
+			t.Fatalf("%s: %+v %v", tc.action, got, err)
+		}
+	}
+	if err := s.ApplyObservationAction(ctx, o.ID, "resolve"); err != ErrDisposition {
+		t.Fatal("unconfirmed resolution accepted", err)
+	}
+	if err := s.ApplyObservationAction(ctx, o.ID, "invalid"); err != ErrDisposition {
+		t.Fatal("invalid action accepted", err)
+	}
+}
 
 func mustHost(t *testing.T, ctx context.Context, s Store) *Host {
 	t.Helper()
@@ -672,4 +730,171 @@ func asErr[T error](err error, target *T) bool {
 		err = u.Unwrap()
 	}
 	return false
+}
+
+func contractCredentialSudoSecret(t *testing.T, ctx context.Context, s Store) {
+	withSudo := &Credential{Name: "a", Username: "u", AuthType: AuthSSHKey, SecretEnc: []byte("login"), SudoSecretEnc: []byte("sudo")}
+	without := &Credential{Name: "b", Username: "u", AuthType: AuthPassword, SecretEnc: []byte("login")}
+	for _, c := range []*Credential{withSudo, without} {
+		if err := s.CreateCredential(ctx, c); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := s.GetCredential(ctx, withSudo.ID)
+	if err != nil || string(got.SecretEnc) != "login" || string(got.SudoSecretEnc) != "sudo" {
+		t.Fatalf("sudo secret did not round-trip: %+v err=%v", got, err)
+	}
+	got, err = s.GetCredential(ctx, without.ID)
+	if err != nil || len(got.SudoSecretEnc) != 0 {
+		t.Fatalf("a credential without a sudo secret must read back empty: %+v err=%v", got, err)
+	}
+	list, err := s.ListCredentials(ctx)
+	if err != nil || len(list) != 2 {
+		t.Fatalf("list: %d err=%v", len(list), err)
+	}
+	for _, c := range list {
+		if c.ID == withSudo.ID && string(c.SudoSecretEnc) != "sudo" {
+			t.Fatalf("list dropped the sudo secret: %+v", c)
+		}
+	}
+}
+
+func setReopenAfter(s Store, d time.Duration) {
+	switch st := s.(type) {
+	case *Memory:
+		st.ReopenAfter = d
+	case *Postgres:
+		st.ReopenAfter = d
+	}
+}
+
+func contractReopenOnReturn(t *testing.T, ctx context.Context, s Store) {
+	const window = time.Second
+	pause := func() { time.Sleep(window + 200*time.Millisecond) }
+	setReopenAfter(s, window)
+	h := mustHost(t, ctx, s)
+	newScan := func() string {
+		t.Helper()
+		// Scans in production are seconds apart; a clock that returns the same microsecond
+		// twice would make "before" and "after" indistinguishable and the test flaky.
+		time.Sleep(5 * time.Millisecond)
+		sc := &Scan{HostID: h.ID, Trigger: TriggerManual, Status: ScanOK, StartedAt: time.Now().UTC()}
+		if err := s.CreateScan(ctx, sc); err != nil {
+			t.Fatal(err)
+		}
+		return sc.ID
+	}
+	seen := func(scan, key string) *Observation {
+		t.Helper()
+		o, err := s.UpsertObservation(ctx, &Observation{HostID: h.ID, ScanID: scan, Source: "agentless_probe", RuleID: "r",
+			Category: "c", Severity: "low", DedupKey: key})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return o
+	}
+	closeFP := func(o *Observation) {
+		t.Helper()
+		if err := s.ApplyObservationAction(ctx, o.ID, "close_false_positive"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Present on every scan: the same finding, it stays closed however long that goes on.
+	first := seen(newScan(), "fp")
+	closeFP(first)
+	if got := seen(newScan(), "fp"); got.Status != ObsFalsePositive {
+		t.Fatalf("a finding still present on the next scan must stay closed, got %q", got.Status)
+	}
+
+	// Vanished, and came back: the scan in between did not see it, so it reopens, keeping the
+	// verdict and the count.
+	newScan() // a completed scan without the finding
+	pause()
+	got := seen(newScan(), "fp")
+	if got.Status != ObsOpen {
+		t.Fatalf("a closed finding that was absent from a scan and returned must reopen, got %q", got.Status)
+	}
+	if got.Verdict != "false_positive" || got.Count != 3 {
+		t.Fatalf("reopening must keep the earlier verdict and count: verdict=%q count=%d", got.Verdict, got.Count)
+	}
+
+	// An outage is not a disappearance. The host goes unscanned for longer than the window;
+	// the scan before the gap saw the finding, so when scanning resumes nothing has "returned".
+	outage := seen(newScan(), "outage")
+	closeFP(outage)
+	pause()
+	if got := seen(newScan(), "outage"); got.Status != ObsFalsePositive {
+		t.Fatalf("a gap in scanning must not reopen a finding the previous scan saw, got %q", got.Status)
+	}
+
+	// Only closed findings reopen: one a person is working stays as it is.
+	owned := seen(newScan(), "owned")
+	if err := s.ApplyObservationAction(ctx, owned.ID, "confirm_finding"); err != nil {
+		t.Fatal(err)
+	}
+	newScan()
+	pause()
+	if got := seen(newScan(), "owned"); got.Status != ObsAcknowledged || got.Verdict != "true_positive" {
+		t.Fatalf("an acknowledged finding must not be touched: %q/%q", got.Status, got.Verdict)
+	}
+
+	// A resolved finding that comes back is recurrence after remediation.
+	fixed := seen(newScan(), "fixed")
+	if err := s.ApplyObservationAction(ctx, fixed.ID, "confirm_finding"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ApplyObservationAction(ctx, fixed.ID, "resolve"); err != nil {
+		t.Fatal(err)
+	}
+	newScan()
+	pause()
+	if got := seen(newScan(), "fixed"); got.Status != ObsOpen || got.Verdict != "true_positive" {
+		t.Fatalf("a remediated finding that returns must reopen with its verdict: %q/%q", got.Status, got.Verdict)
+	}
+
+	// Disabled: nothing reopens.
+	setReopenAfter(s, 0)
+	off := seen(newScan(), "off")
+	closeFP(off)
+	newScan()
+	pause()
+	if got := seen(newScan(), "off"); got.Status != ObsFalsePositive {
+		t.Fatalf("with reopening disabled a closed finding must stay closed, got %q", got.Status)
+	}
+}
+
+func contractHostInventory(t *testing.T, ctx context.Context, s Store) {
+	a, b := mustHost(t, ctx, s), mustHost(t, ctx, s)
+	save := func(h *Host, items map[string][]string) {
+		t.Helper()
+		if err := s.SaveInventory(ctx, &Inventory{HostID: h.ID, Items: items}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	save(a, map[string][]string{"authorized_keys": {"root:aaa", "dev:bbb"}})
+	save(b, map[string][]string{"authorized_keys": {"dev:bbb"}})
+	// A later scan replaces the whole inventory: a key that was removed must not linger.
+	save(a, map[string][]string{"authorized_keys": {"dev:bbb"}, "password_hashes": {"root:fp1"}})
+	list, err := s.ListInventories(ctx)
+	if err != nil || len(list) != 2 {
+		t.Fatalf("list: %d err=%v", len(list), err)
+	}
+	for _, inv := range list {
+		switch inv.HostID {
+		case a.ID:
+			if len(inv.Items["authorized_keys"]) != 1 || inv.Items["password_hashes"][0] != "root:fp1" {
+				t.Fatalf("save did not replace the previous inventory: %+v", inv.Items)
+			}
+		case b.ID:
+			if len(inv.Items["authorized_keys"]) != 1 {
+				t.Fatalf("another host's inventory changed: %+v", inv.Items)
+			}
+		default:
+			t.Fatalf("unexpected host %s", inv.HostID)
+		}
+		if inv.UpdatedAt.IsZero() {
+			t.Fatal("updated_at not set")
+		}
+	}
 }

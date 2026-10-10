@@ -236,6 +236,11 @@ func TestBulkObservationsTriage(t *testing.T) {
 	o1 := seedObs(t, a.Store, h.ID, "rule-a", "high")
 	o2 := seedObs(t, a.Store, h.ID, "rule-b", "medium")
 	o3 := seedObs(t, a.Store, h.ID, "rule-c", "low")
+	for _, o := range []*store.Observation{o1, o2, o3} {
+		if err := a.Store.SetObservationVerdict(context.Background(), o.ID, "true_positive"); err != nil {
+			t.Fatal(err)
+		}
+	}
 
 	w = do(a, http.MethodPost, "/api/v1/observations/bulk", tokens[store.RoleOperator],
 		map[string]any{"ids": []string{o1.ID, o2.ID, o3.ID}, "status": store.ObsResolved})
