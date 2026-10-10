@@ -8,7 +8,6 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
-	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -34,6 +33,8 @@ func Collect() (*Snapshot, error) {
 	s.Processes = collectProcesses(os.Getpid(), &s.CollectorErrors)
 	s.ListeningSockets = collectListeners()
 	s.Accounts = collectAccounts()
+	collectPasswordSchemes(s.Accounts)
+	s.PrivateKeys = collectPrivateKeys(s.Accounts, &s.CollectorErrors)
 	s.Persistence = collectPersistence(s.Accounts)
 	s.KernelModules = collectModules()
 	s.SuspiciousFiles = collectSuspiciousFiles()
@@ -56,7 +57,8 @@ func Collect() (*Snapshot, error) {
 	s.PrivGroupMembers = collectPrivGroupMembers(s.Accounts)
 	s.WebShells = collectWebShells()
 	s.BpfPinned = collectBpfPinned()
-	s.BpfPrograms = collectBpfPrograms()
+	s.BpfPrograms = collectBpfPrograms(&s.CollectorErrors)
+	enrichBpfPrograms(s.BpfPrograms, &s.CollectorErrors)
 	s.PackageHooks = collectPackageHooks()
 	s.WebServerModules = collectWebServerModules()
 	s.ModprobeCommands = collectModprobeCommands()
@@ -756,12 +758,20 @@ func bpfSyscall(cmd int, attr unsafe.Pointer, size uintptr) (uintptr, syscall.Er
 // that hook syscalls or sniff packets even when they pin nothing under /sys/fs/bpf.
 // Requires CAP_SYS_ADMIN (the probe runs as root); without it the walk simply
 // yields nothing rather than erroring.
-func collectBpfPrograms() []BpfProg {
+func collectBpfPrograms(errors ...*[]string) []BpfProg {
+	record := func(stage string, e syscall.Errno) {
+		if len(errors) > 0 {
+			*errors[0] = append(*errors[0], "BPF "+stage+": "+e.Error())
+		}
+	}
 	var out []BpfProg
 	var id uint32
 	for {
 		next := bpfAttrObjID{ID: id}
 		if _, e := bpfSyscall(unix.BPF_PROG_GET_NEXT_ID, unsafe.Pointer(&next), unsafe.Sizeof(next)); e != 0 {
+			if e != syscall.ENOENT {
+				record("enumeration incomplete", e)
+			}
 			break // ENOENT = end of list; EPERM = not privileged
 		}
 		id = next.NextID
@@ -769,6 +779,7 @@ func collectBpfPrograms() []BpfProg {
 		fa := bpfAttrObjID{ID: id}
 		fd, e := bpfSyscall(unix.BPF_PROG_GET_FD_BY_ID, unsafe.Pointer(&fa), unsafe.Sizeof(fa))
 		if e != 0 {
+			record("program disappeared or inaccessible", e)
 			continue
 		}
 		var info bpfProgInfo
@@ -780,14 +791,19 @@ func collectBpfPrograms() []BpfProg {
 		_, e = bpfSyscall(unix.BPF_OBJ_GET_INFO_BY_FD, unsafe.Pointer(&ia), unsafe.Sizeof(ia))
 		unix.Close(int(fd))
 		if e != 0 {
+			record("program info unavailable", e)
 			continue
 		}
 		out = append(out, BpfProg{
-			ID:   info.ID,
-			Type: bpfProgTypeName(info.Type),
-			Name: unix.ByteSliceToString(info.Name[:]),
-			Tag:  hex.EncodeToString(info.Tag[:]),
-			GPL:  info.Flags&1 == 1,
+			CreatedByUID: info.CreatedByUID,
+			LoadTimeNS:   info.LoadTime,
+			XlatedBytes:  info.XlatedProgLen,
+			JitedBytes:   info.JitedProgLen,
+			ID:           info.ID,
+			Type:         bpfProgTypeName(info.Type),
+			Name:         unix.ByteSliceToString(info.Name[:]),
+			Tag:          hex.EncodeToString(info.Tag[:]),
+			GPL:          info.Flags&1 == 1,
 		})
 	}
 	return out
@@ -1176,17 +1192,42 @@ func collectExposedKubeconfig() []string {
 // nonRootWritable reports whether a path is writable by a non-root principal:
 // other-writable, or group-writable by a non-root group.
 func nonRootWritable(fi os.FileInfo) bool {
-	perm := fi.Mode().Perm()
-	if perm&0o002 != 0 {
-		return true
-	}
-	if st, ok := fi.Sys().(*syscall.Stat_t); ok && perm&0o020 != 0 && st.Gid != 0 {
-		return true
-	}
-	return false
+	via, _ := writableVia(fi)
+	return via != ""
 }
 
-func collectWritablePersistence() []string {
+// writableVia reports how a non-root principal can write the path — "other" for
+// world-writable, "group" for group-writable by a non-root group (with that group's gid)
+// — or "" when only root can. Checked in that order because world-writable is the
+// stronger finding and subsumes the group case.
+func writableVia(fi os.FileInfo) (via string, gid uint32) {
+	perm := fi.Mode().Perm()
+	if perm&0o002 != 0 {
+		return "other", 0
+	}
+	if st, ok := fi.Sys().(*syscall.Stat_t); ok && perm&0o020 != 0 && st.Gid != 0 {
+		return "group", st.Gid
+	}
+	return "", 0
+}
+
+// groupNames maps gid to group name from /etc/group. Read once per collection; an
+// unresolvable gid simply yields no name, which is a missing label rather than an error.
+func groupNames() map[uint32]string {
+	out := map[uint32]string{}
+	for _, line := range nonEmptyLines(readFile("/etc/group")) {
+		f := strings.Split(strings.TrimSpace(line), ":")
+		if len(f) < 3 {
+			continue
+		}
+		if gid, err := strconv.ParseUint(f[2], 10, 32); err == nil {
+			out[uint32(gid)] = f[0]
+		}
+	}
+	return out
+}
+
+func collectWritablePersistence() []WritablePersistenceEntry {
 	files := []string{"/etc/crontab", "/etc/rc.local", "/etc/ld.so.preload"}
 	for _, g := range []string{
 		"/etc/systemd/system/*.service", "/etc/systemd/system/*.timer",
@@ -1205,14 +1246,27 @@ func collectWritablePersistence() []string {
 		"/etc/cron.weekly", "/etc/cron.monthly", "/etc/sudoers.d", "/etc/init.d",
 		"/etc/profile.d", "/etc/update-motd.d", "/etc/ld.so.conf.d",
 	}
-	var out []string
+	groups := groupNames()
+	entry := func(path string, fi os.FileInfo, dir bool) (WritablePersistenceEntry, bool) {
+		via, gid := writableVia(fi)
+		if via == "" {
+			return WritablePersistenceEntry{}, false
+		}
+		e := WritablePersistenceEntry{Path: path, Via: via, Mode: octalMode(fi.Mode()), Dir: dir}
+		if via == "group" {
+			e.Group = groups[gid]
+		}
+		return e, true
+	}
+
+	var out []WritablePersistenceEntry
 	for _, p := range files {
 		fi, err := os.Stat(p)
 		if err != nil || fi.IsDir() {
 			continue
 		}
-		if nonRootWritable(fi) {
-			out = append(out, p)
+		if e, ok := entry(p, fi, false); ok {
+			out = append(out, e)
 		}
 	}
 	for _, d := range dirs {
@@ -1220,8 +1274,8 @@ func collectWritablePersistence() []string {
 		if err != nil || !fi.IsDir() {
 			continue
 		}
-		if nonRootWritable(fi) {
-			out = append(out, d+"/ (writable directory)")
+		if e, ok := entry(d, fi, true); ok {
+			out = append(out, e)
 		}
 	}
 	return out
@@ -2343,6 +2397,84 @@ func collectAccounts() []Account {
 	return out
 }
 
+// collectPasswordSchemes adds each account's hash scheme and fingerprint from /etc/shadow.
+// Shadow is root-only, so an unprivileged scan leaves the fields empty rather than failing.
+func collectPasswordSchemes(accts []Account) {
+	data, err := os.ReadFile("/etc/shadow")
+	if err != nil {
+		return
+	}
+	hashes := shadowHashes(string(data))
+	for i := range accts {
+		if h, ok := hashes[accts[i].Name]; ok {
+			accts[i].PasswordScheme = passwordScheme(h)
+			accts[i].PasswordFingerprint = passwordFingerprint(h)
+		}
+	}
+}
+
+// keyFileSkip are the files in ~/.ssh that are never private keys.
+var keyFileSkip = map[string]bool{
+	"authorized_keys": true, "authorized_keys2": true, "known_hosts": true, "known_hosts.old": true,
+	"config": true, "environment": true, "rc": true,
+}
+
+// maxKeyFile bounds what is read as a candidate key: real private keys are a few KB.
+const maxKeyFile = 32 * 1024
+
+// collectPrivateKeys finds SSH private keys in each account's ~/.ssh and loose *.pem / *.key
+// files in the home directory. System host keys under /etc/ssh are meant to be there and are
+// not looked at. Another user's home needs root; if any could not be read the scan says so
+// once, so an empty result is not mistaken for a clean one.
+func collectPrivateKeys(accts []Account, errs *[]string) []PrivateKeyFile {
+	var out []PrivateKeyFile
+	seen := map[string]bool{}
+	denied := false
+	for _, a := range accts {
+		home := a.Home
+		if home == "" || home == "/" || seen[home] {
+			continue
+		}
+		seen[home] = true
+		for _, dir := range []string{home + "/.ssh", home} {
+			entries, err := os.ReadDir(dir)
+			if err != nil {
+				if os.IsPermission(err) {
+					denied = true
+				}
+				continue
+			}
+			for _, e := range entries {
+				name := e.Name()
+				if !e.Type().IsRegular() || keyFileSkip[name] || strings.HasSuffix(name, ".pub") {
+					continue
+				}
+				if dir == home && !strings.HasSuffix(name, ".pem") && !strings.HasSuffix(name, ".key") {
+					continue // the home directory itself: only files named like keys
+				}
+				info, err := e.Info()
+				if err != nil || info.Size() == 0 || info.Size() > maxKeyFile {
+					continue
+				}
+				data, err := os.ReadFile(dir + "/" + name)
+				if err != nil {
+					continue
+				}
+				typ, enc, sha, ok := privateKeyInfo(data)
+				if !ok {
+					continue
+				}
+				out = append(out, PrivateKeyFile{Path: dir + "/" + name, Owner: a.Name, Type: typ,
+					Mode: fmt.Sprintf("%04o", info.Mode().Perm()), Encrypted: enc, PubSHA256: sha})
+			}
+		}
+	}
+	if denied {
+		*errs = append(*errs, "private key scan: some home directories unreadable (run as root for full coverage)")
+	}
+	return out
+}
+
 func collectHostInfo() HostInfo {
 	h := HostInfo{Arch: runtime.GOARCH}
 	h.Hostname = strings.TrimSpace(readFile("/proc/sys/kernel/hostname"))
@@ -2380,6 +2512,7 @@ func collectProcesses(selfPID int, errs *[]string) []Process {
 		return nil
 	}
 	var procs []Process
+	mapsDenied := false
 	for _, e := range entries {
 		pid, err := strconv.Atoi(e.Name())
 		if err != nil {
@@ -2415,11 +2548,36 @@ func collectProcesses(selfPID int, errs *[]string) []Process {
 				p.EnvironEmpty = true
 			}
 		}
+		if p.Exe != "" {
+			p.MappedLibsWritable, p.MappedLibsDeleted, p.PreloadEnv = collectLoadedLibs(base, p.Exe, &mapsDenied)
+		}
 		readProcStatus(base+"/status", &p)
 		procs = append(procs, p)
 	}
+	if mapsDenied {
+		// Said once, not per process. Without it a scan that could read only its own
+		// account's processes looks the same as one that read them all and found nothing.
+		*errs = append(*errs, "process library maps unreadable for other users' processes (run as root for full coverage)")
+	}
 	markPacketSniffers(procs)
 	return procs
+}
+
+// collectLoadedLibs reads what a process has loaded: executable mappings from writable or
+// deleted files, and a non-system LD_PRELOAD/LD_AUDIT in its environment. Both files are
+// readable only by the owner or root. A process that exits mid-read is routine and is not
+// reported; a permission failure is, once, through denied.
+func collectLoadedLibs(base, exe string, denied *bool) (writable, deleted []string, preload string) {
+	if f, err := os.Open(base + "/maps"); err == nil {
+		writable, deleted = scanMaps(f, exe)
+		f.Close()
+	} else if os.IsPermission(err) {
+		*denied = true
+	}
+	if data, err := os.ReadFile(base + "/environ"); err == nil {
+		preload = preloadFromEnviron(data)
+	}
+	return writable, deleted, preload
 }
 
 // markPacketSniffers flags processes holding an AF_PACKET (raw) socket — the
@@ -2557,27 +2715,6 @@ func parseProcNet(path, proto string) []Socket {
 		out = append(out, Socket{Proto: proto, LAddr: ip, LPort: port})
 	}
 	return out
-}
-
-func parseHexAddr(s string) (string, int) {
-	parts := strings.Split(s, ":")
-	if len(parts) != 2 {
-		return "", 0
-	}
-	port, _ := strconv.ParseInt(parts[1], 16, 32)
-	raw, err := hex.DecodeString(parts[0])
-	if err != nil {
-		return "", int(port)
-	}
-	switch len(raw) {
-	case 4: // IPv4, little-endian
-		v := binary.LittleEndian.Uint32(raw)
-		ip := net.IPv4(byte(v), byte(v>>8), byte(v>>16), byte(v>>24))
-		return ip.String(), int(port)
-	case 16:
-		return net.IP(raw).String(), int(port)
-	}
-	return "", int(port)
 }
 
 func collectPersistence(accounts []Account) Persistence {

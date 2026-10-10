@@ -40,7 +40,10 @@ evidence:
   pid: item.pid
   comm: item.comm
   exe: item.exe
-dedup: ["item.pid"]
+# Keyed by program, not PID: a PID is new on every run, so keying by it would open a fresh
+# alert for every run of the same tool. The PID stays in the evidence. A closed alert for
+# the program reopens on its own if it vanishes and returns (see BLADEDR_REOPEN_AFTER).
+dedup: ["item.exe"]
 ---
 id: ssh-tunnel-process
 title: "SSH client tunnel / pivot (dynamic SOCKS, remote forward, or persistent -N -f)"

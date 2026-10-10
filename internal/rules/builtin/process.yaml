@@ -101,3 +101,60 @@ evidence:
   comm: item.comm
   cmdline: item.cmdline
 dedup: ["item.pid", "item.cmdline"]
+---
+id: process-library-from-writable-path
+title: "Process has a shared library loaded from a world-writable directory"
+category: process
+severity: medium
+score: 60
+mitre: ["T1574.006", "T1055"]
+# Executable file mappings only (data mappings of /tmp files are ordinary), and never the
+# process's own binary — that is exec-from-world-writable. Typical of an injected or
+# preloaded implant library; also of AppImage and some installers that unpack to /tmp, so
+# the model weighs it rather than the rule deciding.
+foreach: processes
+when: 'item.mapped_libs_writable != null && item.mapped_libs_writable.size() > 0'
+evidence:
+  pid: item.pid
+  comm: item.comm
+  exe: item.exe
+  libs: item.mapped_libs_writable
+dedup: ["item.exe"]
+---
+id: process-library-deleted
+title: "Process runs a shared library that was deleted from disk after loading"
+category: process
+severity: medium
+score: 60
+mitre: ["T1574.006", "T1070.004"]
+# The library is still mapped but its file is gone: loaded, then unlinked to leave nothing
+# for a file scan. Deletions under /usr, /lib, /opt and /var/lib are package upgrades and
+# are not reported, so this fires only for libraries that lived somewhere nothing installs to.
+# Medium, not high: JVM libraries (JNA, Netty, RocksDB) unpack a native library, load it and
+# delete it as a matter of course, which the snapshot cannot tell from the malicious case.
+foreach: processes
+when: 'item.mapped_libs_deleted != null && item.mapped_libs_deleted.size() > 0'
+evidence:
+  pid: item.pid
+  comm: item.comm
+  exe: item.exe
+  libs: item.mapped_libs_deleted
+dedup: ["item.exe"]
+---
+id: process-ld-preload-env
+title: "Process started with LD_PRELOAD/LD_AUDIT pointing at a non-system library"
+category: process
+severity: high
+score: 75
+mitre: ["T1574.006"]
+# Per-process injection leaves no file-level trace: nothing in ld.so.preload, no unit, no
+# profile line. Only the environment of the running process shows it. Libraries under the
+# distribution directories (jemalloc, libgtk3-nocsd) are not reported.
+foreach: processes
+when: 'item.preload_env != ""'
+evidence:
+  pid: item.pid
+  comm: item.comm
+  exe: item.exe
+  env: item.preload_env
+dedup: ["item.exe"]

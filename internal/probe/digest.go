@@ -3,6 +3,7 @@ package probe
 import (
 	"fmt"
 	"sort"
+	"strings"
 )
 
 // Baseline digest categories.
@@ -14,6 +15,12 @@ const (
 	DigestCron           = "cron"
 	DigestSystemdUnits   = "systemd_units"
 	DigestBpfPrograms    = "bpf_programs"
+
+	// Fleet-correlation categories. They feed the per-host credential inventory used to
+	// find a key or hash shared across hosts, and are not baselined: a changed password
+	// is not drift worth an alert.
+	DigestPasswordHashes = "password_hashes"
+	DigestPrivateKeys    = "private_keys"
 )
 
 // BuildStateDigest summarises a snapshot into per-category sets of stable item
@@ -52,6 +59,20 @@ func BuildStateDigest(s *Snapshot) map[string][]string {
 	for _, akf := range s.Persistence.AuthorizedKeys {
 		for _, k := range akf.Keys {
 			d[DigestAuthorizedKeys] = append(d[DigestAuthorizedKeys], akf.Owner+":"+k.SHA256)
+		}
+	}
+	for _, a := range s.Accounts {
+		if a.PasswordFingerprint != "" && !strings.HasSuffix(a.Shell, "nologin") && !strings.HasSuffix(a.Shell, "false") {
+			d[DigestPasswordHashes] = append(d[DigestPasswordHashes], a.Name+":"+a.PasswordFingerprint)
+		}
+	}
+	for _, k := range s.PrivateKeys {
+		if k.PubSHA256 != "" {
+			state := "plain"
+			if k.Encrypted {
+				state = "locked"
+			}
+			d[DigestPrivateKeys] = append(d[DigestPrivateKeys], k.Owner+":"+k.PubSHA256+":"+state)
 		}
 	}
 	for _, c := range s.Persistence.Cron {

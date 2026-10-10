@@ -84,3 +84,22 @@ evidence:
   path: item.path
   line: item.line
 dedup: ["item.path", "item.line"]
+---
+id: unprotected-ssh-private-key
+title: "SSH private key without a passphrase stored in a home directory"
+category: credential
+severity: medium
+score: 50
+mitre: ["T1552.004"]
+# An unencrypted private key is a credential for whatever authorizes it: whoever reads the
+# file — a backup, a compromised account, a stolen disk — logs in as its owner with no
+# further secret. Automation keys (deploy, backup, CI) are routinely stored this way on
+# purpose, which is why the model weighs this one. Passphrase-protected keys are not reported.
+foreach: private_keys
+when: 'item.encrypted == false'
+evidence:
+  path: item.path
+  owner: item.owner
+  type: item.type
+  mode: item.mode
+dedup: ["item.path"]
