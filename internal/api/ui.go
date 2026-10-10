@@ -249,9 +249,7 @@ func (a *API) uiEditHostForm(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	lines := make([]string, 0, len(h.Tags))
-	for _, kv := range tagPairs(h.Tags) {
-		lines = append(lines, kv)
-	}
+	lines = append(lines, tagPairs(h.Tags)...)
 	username, authType := "", store.AuthPassword
 	if h.CredentialID != "" {
 		if c, err := a.Store.GetCredential(r.Context(), h.CredentialID); err == nil {
@@ -286,7 +284,32 @@ func (a *API) uiEditHost(w http.ResponseWriter, r *http.Request) {
 	h.Tags = parseTagLines(r.FormValue("tags"))
 	// Credential change: only when a new secret is supplied (we can't re-seal
 	// without it). Creates a fresh sealed credential and repoints the host.
-	if secret := r.FormValue("secret"); strings.TrimSpace(secret) != "" {
+	secret, sudoPW := r.FormValue("secret"), r.FormValue("sudo_password")
+	if strings.TrimSpace(secret) == "" && sudoPW != "" && h.CredentialID != "" {
+		// Only the sudo password changed: keep the sealed login secret as it is (ciphertext
+		// is reused, nothing is opened) and attach the new sudo password to a fresh row.
+		if a.Crypto == nil {
+			http.Error(w, "credential sealing disabled: no node key configured", http.StatusServiceUnavailable)
+			return
+		}
+		old, err := a.Store.GetCredential(r.Context(), h.CredentialID)
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		sealedSudo, err := a.Crypto.Seal([]byte(sudoPW))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		cred := &store.Credential{Name: old.Name, Username: old.Username, AuthType: old.AuthType, SecretEnc: old.SecretEnc, SudoSecretEnc: sealedSudo}
+		if err := a.Store.CreateCredential(r.Context(), cred); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		h.CredentialID = cred.ID
+	}
+	if strings.TrimSpace(secret) != "" {
 		if a.Crypto == nil {
 			http.Error(w, "credential sealing disabled: no node key configured", http.StatusServiceUnavailable)
 			return
@@ -306,6 +329,17 @@ func (a *API) uiEditHost(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		cred := &store.Credential{Name: user + "@" + h.PrimaryIP, Username: user, AuthType: authType, SecretEnc: sealed}
+		if sudoPW != "" {
+			if cred.SudoSecretEnc, err = a.Crypto.Seal([]byte(sudoPW)); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		} else if h.CredentialID != "" {
+			// Replacing the login secret must not silently drop the sudo password.
+			if old, err := a.Store.GetCredential(r.Context(), h.CredentialID); err == nil {
+				cred.SudoSecretEnc = old.SudoSecretEnc
+			}
+		}
 		if err := a.Store.CreateCredential(r.Context(), cred); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -502,6 +536,12 @@ func (a *API) uiAddHost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cred := &store.Credential{Name: user + "@" + ip, Username: user, AuthType: authType, SecretEnc: sealed}
+	if sudoPW := r.FormValue("sudo_password"); sudoPW != "" {
+		if cred.SudoSecretEnc, err = a.Crypto.Seal([]byte(sudoPW)); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
 	if err := a.Store.CreateCredential(r.Context(), cred); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

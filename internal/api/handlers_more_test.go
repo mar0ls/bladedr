@@ -126,8 +126,8 @@ func TestProductionRiskLabelsUseSeparateClassWindows(t *testing.T) {
 	ctx := context.Background()
 	st := &observationFilterStore{Memory: store.NewMemory()}
 	for _, observation := range []*store.Observation{
-		{RuleID: "real", DedupKey: "real", Status: store.ObsAcknowledged},
-		{RuleID: "noise", DedupKey: "noise", Status: store.ObsFalsePositive},
+		{RuleID: "real", DedupKey: "real", Status: store.ObsResolved, Verdict: "true_positive"},
+		{RuleID: "noise", DedupKey: "noise", Status: store.ObsOpen, Verdict: "false_positive"},
 		{RuleID: "pending", DedupKey: "pending", Status: store.ObsOpen},
 	} {
 		if _, err := st.UpsertObservation(ctx, observation); err != nil {
@@ -145,7 +145,7 @@ func TestProductionRiskLabelsUseSeparateClassWindows(t *testing.T) {
 	if len(st.filters) != 2 {
 		t.Fatalf("ListObservations calls = %d, want 2", len(st.filters))
 	}
-	if st.filters[0].Status != store.ObsAcknowledged || st.filters[1].Status != store.ObsFalsePositive {
+	if st.filters[0].Verdict != "true_positive" || st.filters[1].Verdict != "false_positive" {
 		t.Fatalf("unexpected training filters: %+v", st.filters)
 	}
 	for _, filter := range st.filters {
@@ -169,11 +169,11 @@ func TestRiskObservationsUseOpenAndClassWindows(t *testing.T) {
 	}
 	want := []store.ObservationFilter{
 		{Status: store.ObsOpen, Limit: riskOpenLimit},
-		{Status: store.ObsAcknowledged, Limit: riskLabelsPerClass},
-		{Status: store.ObsFalsePositive, Limit: riskLabelsPerClass},
+		{Verdict: "true_positive", Limit: riskLabelsPerClass},
+		{Verdict: "false_positive", Limit: riskLabelsPerClass},
 	}
 	for i := range want {
-		if st.filters[i].Status != want[i].Status || st.filters[i].Limit != want[i].Limit {
+		if st.filters[i].Status != want[i].Status || st.filters[i].Verdict != want[i].Verdict || st.filters[i].Limit != want[i].Limit {
 			t.Errorf("filter %d = %+v, want %+v", i, st.filters[i], want[i])
 		}
 	}

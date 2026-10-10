@@ -21,6 +21,7 @@
         <option value="scan_plus_sensor">scan_plus_sensor (eBPF)</option>
       </select>
       <textarea name="secret" rows="2" style="flex-basis:100%" placeholder="password, or paste the SSH private key (PEM)" required></textarea>
+      <input type="password" name="sudo_password" autocomplete="new-password" style="flex-basis:100%" placeholder="sudo password (optional — lets a key or non-root account run the probe as root)">
       <button class="primary" type="submit">Add host</button>
       <span class="faint">secret is sealed with the node key (split-trust) — never stored in plaintext</span>
     </form>

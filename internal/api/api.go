@@ -394,6 +394,9 @@ func (a *API) createCredential(w http.ResponseWriter, r *http.Request) {
 		Username string `json:"username"`
 		AuthType string `json:"auth_type"`
 		Secret   string `json:"secret"` // private key PEM or password; write-only
+		// SudoPassword is optional and write-only; it lets a key-authenticated account run
+		// the probe under sudo.
+		SudoPassword string `json:"sudo_password"`
 	}
 	if !decode(w, r, &body) {
 		return
@@ -416,11 +419,17 @@ func (a *API) createCredential(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c := &store.Credential{Name: body.Name, Username: body.Username, AuthType: body.AuthType, SecretEnc: sealed}
+	if body.SudoPassword != "" {
+		if c.SudoSecretEnc, err = a.Crypto.Seal([]byte(body.SudoPassword)); err != nil {
+			writeErr(w, err)
+			return
+		}
+	}
 	if err := a.Store.CreateCredential(r.Context(), c); err != nil {
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, c) // secret not echoed back
+	writeJSON(w, http.StatusCreated, c) // secrets not echoed back
 }
 
 func (a *API) deleteCredential(w http.ResponseWriter, r *http.Request) {
@@ -606,9 +615,8 @@ func (a *API) getObservation(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, o)
 }
 
-// bulkObservations sets the same status on many observations at once (the UI's
-// multi-select triage). Best-effort: it applies to every id it can and returns
-// how many succeeded.
+// bulkObservations applies status aliases using disposition transitions.
+// Best-effort: rejected rows remain unchanged; the response counts successful updates.
 func (a *API) bulkObservations(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		IDs    []string `json:"ids"`
@@ -625,7 +633,7 @@ func (a *API) bulkObservations(w http.ResponseWriter, r *http.Request) {
 	}
 	updated := 0
 	for _, id := range body.IDs {
-		if err := a.Store.SetObservationStatus(r.Context(), id, body.Status); err == nil {
+		if err := a.applyWorkflowStatus(r, id, body.Status); err == nil {
 			updated++
 		}
 	}
@@ -634,9 +642,50 @@ func (a *API) bulkObservations(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) patchObservation(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Status string `json:"status"`
+		Action  string  `json:"action"`
+		Status  string  `json:"status"`
+		Verdict *string `json:"verdict"`
 	}
 	if !decode(w, r, &body) {
+		return
+	}
+	if body.Action != "" {
+		if body.Status != "" || body.Verdict != nil {
+			writeError(w, http.StatusBadRequest, "action cannot be combined with status or verdict")
+			return
+		}
+		if _, _, err := store.ObservationDisposition(body.Action); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid action")
+			return
+		}
+		if err := a.Store.ApplyObservationAction(r.Context(), r.PathValue("id"), body.Action); err != nil {
+			if err == store.ErrDisposition {
+				writeError(w, http.StatusConflict, err.Error())
+			} else {
+				writeErr(w, err)
+			}
+			return
+		}
+		a.audit(r, "observation.disposition", r.PathValue("id"), "ok", "action="+body.Action)
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if body.Verdict != nil {
+		if body.Status != "" {
+			writeError(w, http.StatusBadRequest, "change status and verdict separately")
+			return
+		}
+		v := *body.Verdict
+		if v != "unknown" && v != "true_positive" && v != "false_positive" {
+			writeError(w, http.StatusBadRequest, "invalid verdict")
+			return
+		}
+		if err := a.Store.SetObservationVerdict(r.Context(), r.PathValue("id"), v); err != nil {
+			writeErr(w, err)
+			return
+		}
+		a.audit(r, "observation.verdict", r.PathValue("id"), "ok", "verdict="+v)
+		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 	switch body.Status {
@@ -645,14 +694,31 @@ func (a *API) patchObservation(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid status")
 		return
 	}
-	if err := a.Store.SetObservationStatus(r.Context(), r.PathValue("id"), body.Status); err != nil {
-		writeErr(w, err)
+	if err := a.applyWorkflowStatus(r, r.PathValue("id"), body.Status); err != nil {
+		if err == store.ErrDisposition {
+			writeError(w, http.StatusConflict, err.Error())
+		} else {
+			writeErr(w, err)
+		}
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
 // --- risk scoring (explainable ML prioritiser; see internal/risk) ---
+
+// Legacy status requests use the same transitions as the disposition controls.
+func (a *API) applyWorkflowStatus(r *http.Request, id, status string) error {
+	action := map[string]string{store.ObsOpen: "reopen", store.ObsAcknowledged: "take_ownership", store.ObsResolved: "resolve", store.ObsFalsePositive: "close_false_positive"}[status]
+	if action == "" {
+		return store.ErrDisposition
+	}
+	if err := a.Store.ApplyObservationAction(r.Context(), id, action); err != nil {
+		return err
+	}
+	a.audit(r, "observation.disposition", id, "ok", "action="+action)
+	return nil
+}
 
 const (
 	riskLabelsPerClass = 5_000
@@ -675,13 +741,13 @@ func (a *API) labDataset() ([]*store.Observation, error) {
 // backlog therefore cannot evict triaged observations from the training window.
 func (a *API) productionRiskLabels(ctx context.Context) ([]*store.Observation, error) {
 	labels := make([]*store.Observation, 0, 2*riskLabelsPerClass)
-	for _, status := range []string{store.ObsAcknowledged, store.ObsFalsePositive} {
+	for _, verdict := range []string{"true_positive", "false_positive"} {
 		observations, err := a.Store.ListObservations(ctx, store.ObservationFilter{
-			Status: status,
-			Limit:  riskLabelsPerClass,
+			Verdict: verdict,
+			Limit:   riskLabelsPerClass,
 		})
 		if err != nil {
-			return nil, fmt.Errorf("list %s observations: %w", status, err)
+			return nil, fmt.Errorf("list %s observations: %w", verdict, err)
 		}
 		labels = append(labels, observations...)
 	}
@@ -705,7 +771,7 @@ func (a *API) riskStats(w http.ResponseWriter, r *http.Request) {
 	combined := append(append([]*store.Observation{}, prod...), lab...)
 	labPos, labNeg := 0, 0
 	for _, o := range lab {
-		switch risk.LabelOf(o.Status) {
+		switch risk.LabelOf(o.Verdict) {
 		case risk.Positive:
 			labPos++
 		case risk.Negative:
