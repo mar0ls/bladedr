@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"sort"
 	"strings"
 	"sync"
@@ -13,25 +14,29 @@ import (
 
 // Memory is an in-memory Store for development and tests.
 type Memory struct {
-	mu         sync.RWMutex
-	hosts      map[string]*Host
-	creds      map[string]*Credential
-	scans      map[string]*Scan
-	scanJobs   map[string]*ScanJob
-	obs        map[string]*Observation
-	exports    map[string]*ExportTarget
-	deliveries map[string]*ExportDelivery
-	rules      map[string]*RuleRecord
-	baselines  map[string]*Baseline
-	schedules  map[string]*Schedule
-	colls      map[string]*Collection
-	collMem    map[string]map[string]bool // collectionID -> set of hostIDs (static)
-	users      map[string]*User           // by id
-	sessions   map[string]*Session        // by token digest
-	sensorTok  map[string]*SensorToken    // by token digest
-	audit      []*AuditEvent
-	archive    []*ArchivedRecord
-	responses  map[string]*ResponseAction
+	// ReopenAfter reopens a closed finding that returns after this long unseen; zero
+	// disables it.
+	ReopenAfter time.Duration
+	mu          sync.RWMutex
+	hosts       map[string]*Host
+	creds       map[string]*Credential
+	scans       map[string]*Scan
+	scanJobs    map[string]*ScanJob
+	obs         map[string]*Observation
+	exports     map[string]*ExportTarget
+	deliveries  map[string]*ExportDelivery
+	rules       map[string]*RuleRecord
+	baselines   map[string]*Baseline
+	inventories map[string]*Inventory
+	schedules   map[string]*Schedule
+	colls       map[string]*Collection
+	collMem     map[string]map[string]bool // collectionID -> set of hostIDs (static)
+	users       map[string]*User           // by id
+	sessions    map[string]*Session        // by token digest
+	sensorTok   map[string]*SensorToken    // by token digest
+	audit       []*AuditEvent
+	archive     []*ArchivedRecord
+	responses   map[string]*ResponseAction
 	// dedup index: hostID -> dedupKey -> observation id
 	dedup map[string]map[string]string
 	SelfApprovalPolicy
@@ -39,25 +44,27 @@ type Memory struct {
 
 func NewMemory() *Memory {
 	return &Memory{
-		hosts:      map[string]*Host{},
-		creds:      map[string]*Credential{},
-		scans:      map[string]*Scan{},
-		scanJobs:   map[string]*ScanJob{},
-		obs:        map[string]*Observation{},
-		exports:    map[string]*ExportTarget{},
-		deliveries: map[string]*ExportDelivery{},
-		rules:      map[string]*RuleRecord{},
-		baselines:  map[string]*Baseline{},
-		schedules:  map[string]*Schedule{},
-		colls:      map[string]*Collection{},
-		collMem:    map[string]map[string]bool{},
-		users:      map[string]*User{},
-		sessions:   map[string]*Session{},
-		sensorTok:  map[string]*SensorToken{},
-		audit:      []*AuditEvent{},
-		archive:    []*ArchivedRecord{},
-		responses:  map[string]*ResponseAction{},
-		dedup:      map[string]map[string]string{},
+		ReopenAfter: DefaultReopenAfter,
+		hosts:       map[string]*Host{},
+		creds:       map[string]*Credential{},
+		scans:       map[string]*Scan{},
+		scanJobs:    map[string]*ScanJob{},
+		obs:         map[string]*Observation{},
+		exports:     map[string]*ExportTarget{},
+		deliveries:  map[string]*ExportDelivery{},
+		rules:       map[string]*RuleRecord{},
+		baselines:   map[string]*Baseline{},
+		inventories: map[string]*Inventory{},
+		schedules:   map[string]*Schedule{},
+		colls:       map[string]*Collection{},
+		collMem:     map[string]map[string]bool{},
+		users:       map[string]*User{},
+		sessions:    map[string]*Session{},
+		sensorTok:   map[string]*SensorToken{},
+		audit:       []*AuditEvent{},
+		archive:     []*ArchivedRecord{},
+		responses:   map[string]*ResponseAction{},
+		dedup:       map[string]map[string]string{},
 	}
 }
 
@@ -271,6 +278,34 @@ func (m *Memory) ListBaselines(_ context.Context) ([]*Baseline, error) {
 	return out, nil
 }
 
+func (m *Memory) SaveInventory(_ context.Context, inv *Inventory) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	c := *inv
+	c.UpdatedAt = time.Now().UTC()
+	c.Items = make(map[string][]string, len(inv.Items))
+	for k, v := range inv.Items {
+		c.Items[k] = append([]string(nil), v...)
+	}
+	m.inventories[inv.HostID] = &c
+	return nil
+}
+
+func (m *Memory) ListInventories(_ context.Context) ([]*Inventory, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make([]*Inventory, 0, len(m.inventories))
+	for _, inv := range m.inventories {
+		c := *inv
+		c.Items = make(map[string][]string, len(inv.Items))
+		for k, v := range inv.Items {
+			c.Items[k] = append([]string(nil), v...)
+		}
+		out = append(out, &c)
+	}
+	return out, nil
+}
+
 func cloneBaseline(b *Baseline) *Baseline {
 	c := *b
 	c.Digest = make(map[string][]string, len(b.Digest))
@@ -379,6 +414,7 @@ func (m *Memory) DeleteCredential(_ context.Context, id string) error {
 func cloneCred(c *Credential) *Credential {
 	cp := *c
 	cp.SecretEnc = append([]byte(nil), c.SecretEnc...)
+	cp.SudoSecretEnc = append([]byte(nil), c.SudoSecretEnc...)
 	return &cp
 }
 
@@ -609,12 +645,18 @@ func (m *Memory) FailScanJob(_ context.Context, id, workerID, message string, re
 }
 
 func (m *Memory) UpsertObservation(_ context.Context, o *Observation) (*Observation, error) {
+	if o.Verdict == "" {
+		o.Verdict = "unknown"
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	now := time.Now().UTC()
 	if byKey, ok := m.dedup[o.HostID]; ok {
 		if id, ok := byKey[o.DedupKey]; ok {
 			ex := m.obs[id]
+			if reopens(ex.Status, ex.LastSeen, now, m.ReopenAfter) && m.absentFromPreviousScanLocked(ex.LastSeen, o.HostID, o.ScanID) {
+				ex.Status = ObsOpen
+			}
 			ex.LastSeen = now
 			ex.Count++
 			ex.Score = o.Score
@@ -645,6 +687,22 @@ func (m *Memory) UpsertObservation(_ context.Context, o *Observation) (*Observat
 	return cloneObs(o), nil
 }
 
+// absentFromPreviousScanLocked reports whether the host's most recent completed scan other
+// than the current one started after the finding was last seen, i.e. did not see it. With no
+// earlier completed scan there is nothing to compare against, and the answer is no.
+func (m *Memory) absentFromPreviousScanLocked(lastSeen time.Time, hostID, currentScan string) bool {
+	var prev time.Time
+	for _, s := range m.scans {
+		if s.HostID != hostID || s.ID == currentScan || (s.Status != ScanOK && s.Status != ScanPartial) {
+			continue
+		}
+		if s.StartedAt.After(prev) {
+			prev = s.StartedAt
+		}
+	}
+	return !prev.IsZero() && lastSeen.Before(prev)
+}
+
 func (m *Memory) enqueueExportsLocked(observationID string, now time.Time) {
 	for _, target := range m.exports {
 		if !target.Enabled {
@@ -667,6 +725,9 @@ func (m *Memory) ListObservations(_ context.Context, f ObservationFilter) ([]*Ob
 			continue
 		}
 		if f.Severity != "" && o.Severity != f.Severity {
+			continue
+		}
+		if f.Verdict != "" && o.Verdict != f.Verdict {
 			continue
 		}
 		if f.Status != "" && o.Status != f.Status {
@@ -718,6 +779,41 @@ func (m *Memory) SetObservationStatus(_ context.Context, id, status string) erro
 		return ErrNotFound{"observation", id}
 	}
 	o.Status = status
+	return nil
+}
+
+func (m *Memory) SetObservationVerdict(_ context.Context, id, verdict string) error {
+	if verdict != "unknown" && verdict != "true_positive" && verdict != "false_positive" {
+		return fmt.Errorf("invalid verdict")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	o, ok := m.obs[id]
+	if !ok {
+		return ErrNotFound{"observation", id}
+	}
+	o.Verdict = verdict
+	return nil
+}
+
+func (m *Memory) ApplyObservationAction(_ context.Context, id, action string) error {
+	status, verdict, err := ObservationDisposition(action)
+	if err != nil {
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	o, ok := m.obs[id]
+	if !ok {
+		return ErrNotFound{"observation", id}
+	}
+	if action == "resolve" && o.Verdict != "true_positive" {
+		return ErrDisposition
+	}
+	o.Status = status
+	if verdict != "" {
+		o.Verdict = verdict
+	}
 	return nil
 }
 

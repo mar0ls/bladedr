@@ -155,6 +155,15 @@ type Baseline struct {
 	CreatedAt time.Time           `json:"created_at"`
 }
 
+// Inventory is a host's current set of fleet-correlated identifiers (authorized SSH keys,
+// password-hash fingerprints, private keys found on disk), replaced on every scan. It
+// holds fingerprints only — never a key or a hash.
+type Inventory struct {
+	HostID    string              `json:"host_id"`
+	Items     map[string][]string `json:"items"`
+	UpdatedAt time.Time           `json:"updated_at"`
+}
+
 // Observation lifecycle status.
 const (
 	ObsOpen          = "open"
@@ -207,12 +216,15 @@ const (
 // key or password); it is never exposed through the API (json:"-") and, per the
 // split-trust model, the server cannot decrypt it without the node private key.
 type Credential struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	Username  string    `json:"username"`
-	AuthType  string    `json:"auth_type"`
-	SecretEnc []byte    `json:"-"`
-	CreatedAt time.Time `json:"created_at"`
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Username  string `json:"username"`
+	AuthType  string `json:"auth_type"`
+	SecretEnc []byte `json:"-"`
+	// SudoSecretEnc is an optional sudo password sealed like SecretEnc. Empty means the
+	// login password (if the account uses one) is what escalation tries.
+	SudoSecretEnc []byte    `json:"-"`
+	CreatedAt     time.Time `json:"created_at"`
 }
 
 type Host struct {
@@ -260,13 +272,35 @@ type Observation struct {
 	Evidence  map[string]any `json:"evidence,omitempty"`
 	DedupKey  string         `json:"dedup_key"`
 	Status    string         `json:"status"`
+	Verdict   string         `json:"verdict"`
 	FirstSeen time.Time      `json:"first_seen"`
 	LastSeen  time.Time      `json:"last_seen"`
 	Count     int            `json:"count"`
 }
 
+// DefaultReopenAfter is how long a closed finding (false_positive or resolved) must go
+// unseen before its return reopens it. See Observation re-detection in UpsertObservation.
+const DefaultReopenAfter = 24 * time.Hour
+
+// reopens reports whether a re-detected finding should go back to open: it was closed,
+// the last scan that saw it was at least window ago, and — decided by the caller, who
+// knows the host's scans — the scan before this one did not see it. A finding that is still
+// present scan after scan is the same finding and stays closed; one that vanished and came
+// back is new behaviour that an earlier close says nothing about, however it was labelled.
+// The last condition is what keeps an outage from reopening everything: a host that was
+// unreachable for a week has gone a week between sightings of every finding it carries, yet
+// nothing vanished — the previous scan, before the outage, saw them all.
+// The verdict is kept, so the earlier assessment is still there to confirm or overturn.
+func reopens(status string, lastSeen, now time.Time, window time.Duration) bool {
+	if window <= 0 || (status != ObsFalsePositive && status != ObsResolved) {
+		return false
+	}
+	return now.Sub(lastSeen) >= window
+}
+
 // ObservationFilter narrows list queries. Zero-value fields are ignored.
 type ObservationFilter struct {
+	Verdict    string
 	HostID     string
 	Severity   string
 	Status     string
@@ -421,6 +455,8 @@ type Store interface {
 	ListObservations(ctx context.Context, f ObservationFilter) ([]*Observation, error)
 	GetObservation(ctx context.Context, id string) (*Observation, error)
 	SetObservationStatus(ctx context.Context, id, status string) error
+	SetObservationVerdict(ctx context.Context, id, verdict string) error
+	ApplyObservationAction(ctx context.Context, id, action string) error
 
 	CreateExportTarget(ctx context.Context, target *ExportTarget) error
 	GetExportTarget(ctx context.Context, id string) (*ExportTarget, error)
@@ -446,6 +482,9 @@ type Store interface {
 	SaveBaseline(ctx context.Context, b *Baseline) error
 	DeleteBaseline(ctx context.Context, hostID string) error
 	ListBaselines(ctx context.Context) ([]*Baseline, error) // for fleet rarity scoring
+	// Current credential inventory per host (fleet key / hash reuse). Save replaces.
+	SaveInventory(ctx context.Context, inv *Inventory) error
+	ListInventories(ctx context.Context) ([]*Inventory, error)
 
 	// Recurring scan schedules, driven by the background scheduler.
 	CreateSchedule(ctx context.Context, s *Schedule) error
