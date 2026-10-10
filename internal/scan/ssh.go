@@ -32,6 +32,9 @@ type SSHTransport struct {
 	OnLearnHostKey  func(key string)
 	ProbeBinary     []byte // statically-linked probe for the target arch
 	Timeout         time.Duration
+	// SudoPassword is the account's password when it authenticates with one; it lets a
+	// non-root account run the probe via `sudo -S`. Empty means try passwordless sudo.
+	SudoPassword string
 }
 
 func NewSSHTransport(host, ipPort string, user string, auth []ssh.AuthMethod, probeBin []byte) *SSHTransport {
@@ -177,6 +180,8 @@ func (t *SSHTransport) RunProbe(ctx context.Context, bundle probe.RuleBundle, em
 	if out, err := run(client, cacheDirScript(probeCacheDir), nil); err != nil {
 		return res, fmt.Errorf("prepare probe cache: %w (%s)", err, bytes.TrimSpace(out))
 	}
+	// Best effort: a failure here must never fail the scan.
+	_, _ = run(client, pruneStaleProbes(probeCacheDir, "probe-"+digest[:12]), nil)
 	if !t.probeCached(client, probePath, digest) {
 		// Atomic install: write to a per-upload temp name, then rename over the
 		// cached path. Concurrent scans of the same host therefore never execute a
@@ -196,10 +201,8 @@ func (t *SSHTransport) RunProbe(ctx context.Context, bundle probe.RuleBundle, em
 		return res, fmt.Errorf("upload bundle: %w", err)
 	}
 
-	cmd := probePath + " --rules " + bundlePath
-	if emitSnapshot {
-		cmd += " --emit-snapshot"
-	}
+	bundleSum := sha256.Sum256(bundleJSON)
+	cmd := probeCommand(t.User, t.SudoPassword, probePath, digest, bundlePath, hex.EncodeToString(bundleSum[:]), emitSnapshot)
 	out, err := run(client, cmd, nil)
 	if err != nil {
 		return res, fmt.Errorf("run probe: %w", err)
@@ -208,6 +211,60 @@ func (t *SSHTransport) RunProbe(ctx context.Context, bundle probe.RuleBundle, em
 		return res, fmt.Errorf("parse probe output: %w", err)
 	}
 	return res, nil
+}
+
+// pruneStaleProbes deletes what earlier scans left in the cache: probe binaries of other
+// versions (about 16 MB each, one more per upgrade, never reused) and rule bundles or
+// staging files from scans that died before cleaning up. Only names this code creates are
+// matched, so the sensor staging files that share the directory are untouched.
+//
+// Anything modified in the last hour is kept. That is the margin for a concurrent scan
+// that has just uploaded its probe and is about to run it, or for a second control plane
+// on a different version; a binary that is deleted while running keeps running anyway, and
+// one that a live scan still needs is simply re-uploaded by its next scan.
+func pruneStaleProbes(dir, keep string) string {
+	return "find " + shellArg(dir) + " -maxdepth 1 -type f -mmin +60 " +
+		`\( -name 'probe-*' -o -name 'rules-*.json' \) ! -name ` + shellArg(keep) + " -delete 2>/dev/null || true"
+}
+
+// probeCommand runs the probe as root when the scan account can get there, and as the
+// account itself otherwise. Unprivileged, the probe cannot open /dev/kmsg or read other
+// users' processes, so the scan comes back partial — while the poligon, which runs the
+// probe under sudo, trains the risk model on what a root probe sees.
+//
+// Escalation is attempted, never required: an account without sudo rights still gets
+// the unprivileged scan it got before. `sudo -l sh` asks whether escalation is allowed
+// without running anything, so an account outside sudoers doesn't log an incident on
+// every scheduled scan.
+func probeCommand(user, sudoPW, probePath, probeDigest, bundlePath, bundleDigest string, emitSnapshot bool) string {
+	args := ""
+	if emitSnapshot {
+		args = " --emit-snapshot"
+	}
+	direct := probePath + " --rules " + bundlePath + args
+	if user == "root" {
+		return direct
+	}
+	priv := shellArg(privilegedProbeScript(probePath, probeDigest, bundlePath, bundleDigest, args))
+	if sudoPW == "" {
+		return "if sudo -n -l sh >/dev/null 2>&1; then sudo -n sh -c " + priv + "; else " + direct + "; fi"
+	}
+	feed := "printf '%s\\n' " + shellArg(sudoPW) + " | "
+	return "if " + feed + "sudo -S -p '' -l sh >/dev/null 2>&1; then " + feed + "sudo -S -p '' sh -c " + priv + "; else " + direct + "; fi"
+}
+
+// privilegedProbeScript runs as root. The cache directory belongs to the scan account,
+// so executing the probe from it would let anyone holding that account — but not its
+// sudo password — swap the binary between the digest check and the run, and be handed
+// root by the next scan. Both files are copied into a root-owned directory and checked
+// against the digests the server computed before anything executes; a mismatch fails
+// the scan rather than falling back, because it means something rewrote the probe.
+func privilegedProbeScript(probePath, probeDigest, bundlePath, bundleDigest, args string) string {
+	return `d=$(mktemp -d) || exit 1
+trap 'rm -rf "$d"' EXIT
+cp ` + probePath + ` "$d/probe" && cp ` + bundlePath + ` "$d/rules.json" || exit 1
+[ "$(sha256sum "$d/probe" "$d/rules.json" | cut -d' ' -f1 | tr '\n' ' ')" = "` + probeDigest + ` ` + bundleDigest + ` " ] || { echo "probe or rule bundle changed after upload; refusing to run it as root" >&2; exit 1; }
+"$d/probe" --rules "$d/rules.json"` + args
 }
 
 // run executes a single command in its own session, optionally piping stdin, and
@@ -254,11 +311,6 @@ func randHex(n int) string {
 	b := make([]byte, n)
 	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
-}
-
-// ParsePrivateKey is a small helper for building a signer from PEM key bytes.
-func ParsePrivateKey(pem []byte) (ssh.Signer, error) {
-	return ssh.ParsePrivateKey(pem)
 }
 
 // dial opens an SSH client to the host, closing it when ctx is cancelled so a hung

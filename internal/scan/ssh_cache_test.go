@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 // runCacheScript executes the guard the way the remote host does — through /bin/sh
@@ -174,5 +175,62 @@ func TestCacheDirScriptQuotesDir(t *testing.T) {
 	}
 	if _, err := os.Stat("pwned"); err == nil {
 		t.Fatal("injected command executed")
+	}
+}
+
+func TestPruneStaleProbes(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell")
+	}
+	dir := t.TempDir()
+	old := time.Now().Add(-3 * time.Hour)
+	files := map[string]bool{ // name -> aged past the one-hour margin
+		"probe-current000":          true,  // the version in use: kept even though old
+		"probe-oldversion1":         true,  // another version, stale: removed
+		"probe-fresh0000000":        false, // another version, just uploaded by a concurrent scan: kept
+		"probe-current000.tmp.ab12": true,  // staging of the current one is not a different version... stale leftovers go
+		"rules-aaaa.json":           true,  // bundle from a scan that died: removed
+		"rules-bbbb.json":           false, // bundle of a scan in flight: kept
+		"sensor":                    true,  // sensor deployment files must never be touched
+		"sensor-token":              true,
+		"deploy.sh":                 true,
+		"policies.tgz":              true,
+	}
+	for name, aged := range files {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if aged {
+			if err := os.Chtimes(path, old, old); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if out, err := exec.Command("/bin/sh", "-c", pruneStaleProbes(dir, "probe-current000")).CombinedOutput(); err != nil {
+		t.Fatalf("prune failed: %v (%s)", err, out)
+	}
+	want := map[string]bool{
+		"probe-current000": true, "probe-fresh0000000": true, "rules-bbbb.json": true,
+		"sensor": true, "sensor-token": true, "deploy.sh": true, "policies.tgz": true,
+	}
+	entries, _ := os.ReadDir(dir)
+	got := map[string]bool{}
+	for _, e := range entries {
+		got[e.Name()] = true
+	}
+	for name := range want {
+		if !got[name] {
+			t.Errorf("%s was deleted but must be kept", name)
+		}
+	}
+	for name := range got {
+		if !want[name] {
+			t.Errorf("%s survived but is stale", name)
+		}
+	}
+	// A directory that does not exist yet must not fail the scan.
+	if out, err := exec.Command("/bin/sh", "-c", pruneStaleProbes(filepath.Join(dir, "missing"), "x")).CombinedOutput(); err != nil {
+		t.Errorf("pruning a missing dir must succeed: %v (%s)", err, out)
 	}
 }
