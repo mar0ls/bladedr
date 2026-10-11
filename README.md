@@ -158,7 +158,7 @@ The server runs anywhere; scan targets are always Linux (over SSH).
 
 ```sh
 docker run -p 127.0.0.1:8080:8080 \
-  -e BLADEDR_DATABASE_URL=postgres://… -e BLADEDR_NODE_KEY=… mar0ls/bladedr:0.9.2
+  -e BLADEDR_DATABASE_URL=postgres://… -e BLADEDR_NODE_KEY=… mar0ls/bladedr:0.9.3
 ```
 
 That is the whole agentless product: the image carries the probe for linux/amd64 and

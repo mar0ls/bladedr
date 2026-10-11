@@ -3,7 +3,13 @@
 Notable changes. Format loosely follows [Keep a Changelog](https://keepachangelog.com);
 versions follow [SemVer](https://semver.org).
 
-## [Unreleased]
+## [0.9.3] - 2026-10-11
+
+A status-code fix found the same day it shipped: enabling the eBPF sensor on a server
+with no policy bundle answered 502, read as the host being unreachable, and cost a host
+record. Also: unit coverage for `internal/probe`'s detection-logic parsers and
+`internal/export`'s syslog delivery, previously exercised only by a full lab run or not
+at all.
 
 ### Fixed
 
