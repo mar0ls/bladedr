@@ -43,6 +43,14 @@ type Runner struct {
 	NewSensorTransport func(h *store.Host) (*SSHTransport, string, error)
 }
 
+// ErrSensorNotConfigured means this bladedr install is missing something EnableSensor
+// needs (a sensor binary, a policy bundle, SSH wiring) — the server's own setup, not the
+// target host. The API maps it to 503 rather than 502: the host was never contacted, so
+// "bad gateway" would blame the wrong end.
+type ErrSensorNotConfigured string
+
+func (e ErrSensorNotConfigured) Error() string { return string(e) }
+
 // EnableSensor deploys + starts the eBPF sensor on the host (over SSH) and sets the
 // host to scan_plus_sensor.
 func (r *Runner) EnableSensor(ctx context.Context, host *store.Host) error {
@@ -52,13 +60,13 @@ func (r *Runner) EnableSensor(ctx context.Context, host *store.Host) error {
 	}
 	bin := r.SensorBins[arch]
 	if bin == nil {
-		return fmt.Errorf("no sensor binary for arch %q (set BLADEDR_SENSOR_LINUX_%s)", arch, strings.ToUpper(arch))
+		return ErrSensorNotConfigured(fmt.Sprintf("no sensor binary for arch %q (set BLADEDR_SENSOR_LINUX_%s)", arch, strings.ToUpper(arch)))
 	}
 	if len(r.PolicyTar) == 0 {
-		return fmt.Errorf("no policy bundle configured (set BLADEDR_POLICY_DIR)")
+		return ErrSensorNotConfigured("no policy bundle configured (set BLADEDR_POLICY_DIR)")
 	}
 	if r.NewSensorTransport == nil {
-		return fmt.Errorf("sensor deploy not available (no SSH transport)")
+		return ErrSensorNotConfigured("sensor deploy not available (no SSH transport)")
 	}
 	t, pw, err := r.NewSensorTransport(host)
 	if err != nil {

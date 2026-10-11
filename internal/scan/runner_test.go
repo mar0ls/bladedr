@@ -3,6 +3,7 @@ package scan
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"bladedr/internal/probe"
@@ -92,20 +93,33 @@ func TestEnableSensorGuardErrors(t *testing.T) {
 	st := store.NewMemory()
 	host := &store.Host{Hostname: "h", Arch: "amd64"}
 
-	// No sensor binary for the arch.
-	if err := (&Runner{Store: st}).EnableSensor(ctx, host); err == nil {
-		t.Fatal("EnableSensor without a sensor binary should error")
+	// Every precondition failure is ErrSensorNotConfigured — a missing-setup error on
+	// this install, not a failure to reach the host — so the API can tell the two apart
+	// and answer 503, not 502 (bladedr/mar0ls#20: it answered 502 for all three).
+	assertNotConfigured := func(t *testing.T, err error, want string) {
+		t.Helper()
+		var nc ErrSensorNotConfigured
+		if !errors.As(err, &nc) {
+			t.Fatalf("%v: want ErrSensorNotConfigured, got %T", err, err)
+		}
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q does not mention %q", err, want)
+		}
 	}
+
+	// No sensor binary for the arch.
+	err := (&Runner{Store: st}).EnableSensor(ctx, host)
+	assertNotConfigured(t, err, "BLADEDR_SENSOR_LINUX_AMD64")
+
 	// Binary present but no policy bundle.
 	r := &Runner{Store: st, SensorBins: map[string][]byte{"amd64": {0x1}}}
-	if err := r.EnableSensor(ctx, host); err == nil {
-		t.Fatal("EnableSensor without a policy bundle should error")
-	}
+	err = r.EnableSensor(ctx, host)
+	assertNotConfigured(t, err, "BLADEDR_POLICY_DIR")
+
 	// Binary + policy but no SSH transport configured.
 	r = &Runner{Store: st, SensorBins: map[string][]byte{"amd64": {0x1}}, PolicyTar: []byte{0x1}}
-	if err := r.EnableSensor(ctx, host); err == nil {
-		t.Fatal("EnableSensor without a sensor transport should error")
-	}
+	err = r.EnableSensor(ctx, host)
+	assertNotConfigured(t, err, "SSH transport")
 }
 
 func TestDisableSensorWithoutTransportSetsScanOnly(t *testing.T) {

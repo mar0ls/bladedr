@@ -866,7 +866,14 @@ func (a *API) hostSensor(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		a.audit(r, "sensor."+body.Action, host.ID, "fail", err.Error())
-		writeError(w, http.StatusBadGateway, err.Error())
+		var notConfigured scan.ErrSensorNotConfigured
+		if errors.As(err, &notConfigured) {
+			writeError(w, http.StatusServiceUnavailable, err.Error())
+		} else {
+			// Everything past the preconditions is a real attempt to reach the host:
+			// dial/auth/deploy failures. 502 (upstream failed), not a bug in bladedr itself.
+			writeError(w, http.StatusBadGateway, err.Error())
+		}
 		return
 	}
 	a.audit(r, "sensor."+body.Action, host.ID, "ok", "")
@@ -1613,6 +1620,13 @@ func writeErr(w http.ResponseWriter, err error) {
 	var self store.ErrSelfApproval
 	if errors.As(err, &self) {
 		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+	// This install is missing something EnableSensor needs — not a failure to reach the
+	// host, so not the 502 a transport-level failure gets below.
+	var notConfigured scan.ErrSensorNotConfigured
+	if errors.As(err, &notConfigured) {
+		writeError(w, http.StatusServiceUnavailable, err.Error())
 		return
 	}
 	writeError(w, http.StatusInternalServerError, err.Error())
