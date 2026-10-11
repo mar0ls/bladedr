@@ -5,6 +5,7 @@ package probe
 import (
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 )
 
@@ -198,5 +199,212 @@ func TestFileToolMarker(t *testing.T) {
 	}
 	if got := fileToolMarker(benign, 200<<20); got != "" {
 		t.Errorf("fileToolMarker with oversize = %q, want empty", got)
+	}
+}
+
+func TestDecodeDangerousCaps(t *testing.T) {
+	cases := []struct {
+		name, hex string
+		want      []string
+	}{
+		{"cap_setuid only (bit 7)", "AAAAAAAA80000000", []string{"cap_setuid"}},
+		{"cap_setuid plus a non-dangerous bit (10)", "AAAAAAAA80040000", []string{"cap_setuid"}},
+		{"cap_net_raw alone (bit 13) is not dangerous", "AAAAAAAA00200000", nil},
+		{"too short", "AABBCC", nil},
+		{"invalid hex", "not-hex-zz", nil},
+		{"empty", "", nil},
+	}
+	for _, c := range cases {
+		got := decodeDangerousCaps(c.hex)
+		if len(got) != len(c.want) {
+			t.Errorf("%s: decodeDangerousCaps(%q) = %v, want %v", c.name, c.hex, got, c.want)
+			continue
+		}
+		for i := range got {
+			if got[i] != c.want[i] {
+				t.Errorf("%s: decodeDangerousCaps(%q) = %v, want %v", c.name, c.hex, got, c.want)
+			}
+		}
+	}
+}
+
+func TestGtfobinsSuidMatch(t *testing.T) {
+	cases := map[string]bool{
+		"bash": true, "BASH": true, "python": true, "python3.11": true,
+		"perl5.34": true, "vim": true, "nginx": false, "python3x": false,
+		"": false, "pythonista": false,
+	}
+	for in, want := range cases {
+		if got := gtfobinsSuidMatch(in); got != want {
+			t.Errorf("gtfobinsSuidMatch(%q) = %v, want %v", in, got, want)
+		}
+	}
+}
+
+func TestSudoGtfoBin(t *testing.T) {
+	cases := map[string]string{
+		"deploy ALL=(root) NOPASSWD: /usr/bin/find":          "find",
+		"deploy ALL=(root) NOPASSWD: /usr/bin/systemctl":     "",
+		"%admin ALL=(ALL) NOPASSWD: /sbin/nft":               "nft",
+		"ALL=(ALL) NOPASSWD: /usr/bin/foo, /usr/bin/python3": "python3",
+		"deploy ALL=(ALL) ALL":                               "",
+	}
+	for in, want := range cases {
+		if got := sudoGtfoBin(in); got != want {
+			t.Errorf("sudoGtfoBin(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestPthLooksMalicious(t *testing.T) {
+	cases := map[string]bool{
+		"import os; os.system('id')":         true,
+		"import subprocess":                  true,
+		"exec(base64.b64decode('...'))":      true,
+		"import sys; sys.path.append('.')":   false,
+		"__import__('setuptools').bootstrap": false,
+		"":                                   false,
+	}
+	for in, want := range cases {
+		if got := pthLooksMalicious(in); got != want {
+			t.Errorf("pthLooksMalicious(%q) = %v, want %v", in, got, want)
+		}
+	}
+}
+
+func TestHistoryTampering(t *testing.T) {
+	cases := map[string]bool{
+		"set +o history":              true,
+		"unset HISTFILE":              true,
+		"export HISTFILE=/dev/null":   true,
+		"HISTFILE=/dev/null":          true,
+		"export HISTSIZE=0":           true,
+		"export HISTFILESIZE=0":       true,
+		`HISTFILE=""`:                 true,
+		"HISTFILE=''":                 true,
+		"# export HISTFILE=/dev/null": false,
+		"":                            false,
+		"export PATH=/usr/bin":        false,
+		"HISTSIZE=1000":               false,
+	}
+	for in, want := range cases {
+		if got := historyTampering(in); got != want {
+			t.Errorf("historyTampering(%q) = %v, want %v", in, got, want)
+		}
+	}
+}
+
+func TestLoginInterpreterMatch(t *testing.T) {
+	cases := map[string]bool{
+		"python": true, "python3.11": true, "perl5.34": true, "PHP": true,
+		"bash": false, "pythonista": false, "": false,
+	}
+	for in, want := range cases {
+		if got := loginInterpreterMatch(in); got != want {
+			t.Errorf("loginInterpreterMatch(%q) = %v, want %v", in, got, want)
+		}
+	}
+}
+
+func TestPathValueHijack(t *testing.T) {
+	cases := map[string]bool{
+		"/usr/local/bin:/usr/bin": false,
+		"/usr/bin:.":              true,
+		"/usr/bin:":               true,
+		"/usr/bin:/tmp":           true,
+		"/usr/bin:/tmp/sub":       true,
+		"/usr/bin:/home/dev/bin":  true,
+		"/usr/bin:/var/tmp":       true,
+		"/usr/bin:/dev/shm":       true,
+		"/usr/bin:/usr/binfoo":    false, // not a /tmp prefix collision
+		"":                        true,
+	}
+	for in, want := range cases {
+		if got := pathValueHijack(in); got != want {
+			t.Errorf("pathValueHijack(%q) = %v, want %v", in, got, want)
+		}
+	}
+}
+
+// fakeFileInfo lets writableVia/nonRootReadable be tested against arbitrary
+// mode/gid combinations without creating real files owned by other groups.
+type fakeFileInfo struct {
+	os.FileInfo
+	mode os.FileMode
+	gid  uint32
+}
+
+func (f fakeFileInfo) Mode() os.FileMode { return f.mode }
+func (f fakeFileInfo) Sys() any          { return &syscall.Stat_t{Gid: f.gid} }
+
+func TestWritableVia(t *testing.T) {
+	cases := []struct {
+		name    string
+		mode    os.FileMode
+		gid     uint32
+		wantVia string
+		wantGid uint32
+	}{
+		{"world-writable", 0o666, 100, "other", 0},
+		{"group-writable, non-root group", 0o660, 100, "group", 100},
+		{"group-writable but root group is not a real grant", 0o660, 0, "", 0},
+		{"neither", 0o640, 100, "", 0},
+		{"world-writable wins over group-writable", 0o666 | 0o020, 100, "other", 0},
+	}
+	for _, c := range cases {
+		via, gid := writableVia(fakeFileInfo{mode: c.mode, gid: c.gid})
+		if via != c.wantVia || gid != c.wantGid {
+			t.Errorf("%s: writableVia(mode=%o,gid=%d) = (%q,%d), want (%q,%d)",
+				c.name, c.mode, c.gid, via, gid, c.wantVia, c.wantGid)
+		}
+	}
+	// nonRootWritable is a thin wrapper: true iff writableVia returns a non-empty via.
+	if !nonRootWritable(fakeFileInfo{mode: 0o666, gid: 100}) {
+		t.Error("nonRootWritable should be true for a world-writable file")
+	}
+	if nonRootWritable(fakeFileInfo{mode: 0o640, gid: 100}) {
+		t.Error("nonRootWritable should be false for a 0640 file")
+	}
+}
+
+func TestNonRootReadable(t *testing.T) {
+	cases := []struct {
+		name string
+		mode os.FileMode
+		gid  uint32
+		want bool
+	}{
+		{"other-readable", 0o644, 100, true},
+		{"group-readable, non-root group", 0o640, 100, true},
+		{"group-readable but root group doesn't count", 0o640, 0, false},
+		{"owner-only", 0o600, 100, false},
+	}
+	for _, c := range cases {
+		if got := nonRootReadable(fakeFileInfo{mode: c.mode, gid: c.gid}); got != c.want {
+			t.Errorf("%s: nonRootReadable(mode=%o,gid=%d) = %v, want %v", c.name, c.mode, c.gid, got, c.want)
+		}
+	}
+}
+
+func TestRealPath(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target")
+	if err := os.WriteFile(target, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	if got := realPath(link); got != target {
+		t.Errorf("realPath(symlink) = %q, want %q", got, target)
+	}
+	// A non-symlink (or a broken one) falls back to the input unchanged.
+	if got := realPath(target); got != target {
+		t.Errorf("realPath(plain file) = %q, want %q", got, target)
+	}
+	missing := filepath.Join(dir, "does-not-exist")
+	if got := realPath(missing); got != missing {
+		t.Errorf("realPath(missing) = %q, want %q (fallback to input)", got, missing)
 	}
 }
