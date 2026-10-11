@@ -3,6 +3,17 @@
 Notable changes. Format loosely follows [Keep a Changelog](https://keepachangelog.com);
 versions follow [SemVer](https://semver.org).
 
+## [Unreleased]
+
+### Known limitations
+
+- Process-level rules that dedup on `item.exe` (`exec-from-world-writable`,
+  `process-ld-preload-env`, and siblings) can merge two distinct processes that happen to
+  share an executable path into one observation, keeping only the last-evaluated instance's
+  evidence. Detection still fires; only the evidence of one contributing process survives.
+  See [COVERAGE.md](COVERAGE.md#known-limitations). Not fixed here — it touches every rule
+  using that dedup pattern, wider than a patch.
+
 ## [0.9.2] - 2026-10-10
 
 Adds detection of credential paths between hosts and of libraries loaded into running

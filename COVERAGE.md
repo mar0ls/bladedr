@@ -182,6 +182,21 @@ diff, authorized_keys baseline-diff, rpm/dnf scriptlet scan, key-library `.so` h
 initramfs/`/boot` hash drift via baseline. (Done: PATH hijack, file capabilities, kernel
 lockdown, systemd timers, GTFOBins in cron/sudo, initramfs hooks, SELinux-disabled, dnf-plugin.)
 
+## Known limitations
+
+**Process-level rules dedup on `item.exe` alone** (`exec-from-world-writable`,
+`process-ld-preload-env`, and siblings). Two distinct processes that happen to share an
+executable path collapse into one observation, and only the last-evaluated instance's
+evidence survives the upsert — the other instance's distinct value (a different injected
+`LD_PRELOAD`, say) is silently overwritten rather than merged or listed. Detection itself
+isn't lost (the rule still fires), only the evidence of one of the contributing processes.
+Narrow in practice — it needs two *different* processes sharing one binary path to *both*
+match the same rule in the same scan — but real: surfaced on a lab host (2026-10-11) where
+three independent scenarios bare-launched the same helper binary. A proper fix needs a dedup
+key that includes the matched value (or a bounded list of contributing PIDs in evidence),
+across every rule that currently dedups by `item.exe`, which is a wider change than a patch
+release; tracked here rather than fixed under time pressure.
+
 ## Phase 2 (eBPF)
 
 `bladedr-sensor` = a thin Tetragon wrapper loading TracingPolicies 1:1, streaming events into
