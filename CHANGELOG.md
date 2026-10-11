@@ -5,6 +5,16 @@ versions follow [SemVer](https://semver.org).
 
 ## [Unreleased]
 
+### Fixed
+
+- `POST /hosts/{id}/sensor` answered 502 (Bad Gateway) when the server itself had no
+  sensor binary, no policy bundle, or no SSH wiring configured — discovered 2026-10-11
+  clicking "Enable" in the console: 502, read as the host being unreachable, host deleted.
+  None of those are a failed attempt to reach the host; they're the server not being set
+  up for the eBPF tier. They now answer 503 (Service Unavailable), matching every other
+  "this install isn't configured for that" error in the API. A real SSH/deploy failure
+  still answers 502.
+
 ### Known limitations
 
 - Process-level rules that dedup on `item.exe` (`exec-from-world-writable`,
