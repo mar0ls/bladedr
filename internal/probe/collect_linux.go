@@ -2513,6 +2513,7 @@ func collectProcesses(selfPID int, errs *[]string) []Process {
 	}
 	var procs []Process
 	mapsDenied := false
+	evidenceRemaining := 8
 	for _, e := range entries {
 		pid, err := strconv.Atoi(e.Name())
 		if err != nil {
@@ -2552,6 +2553,14 @@ func collectProcesses(selfPID int, errs *[]string) []Process {
 			p.MappedLibsWritable, p.MappedLibsDeleted, p.PreloadEnv = collectLoadedLibs(base, p.Exe, &mapsDenied)
 		}
 		readProcStatus(base+"/status", &p)
+		if needsExecutionEvidence(p) {
+			if evidenceRemaining > 0 {
+				p.ExecutionEvidence = collectExecutionEvidence(base, p.Exe)
+				evidenceRemaining--
+			} else {
+				p.ExecutionEvidence = &ProcessExecutionEvidence{Errors: []string{"per-scan process evidence limit reached"}}
+			}
+		}
 		procs = append(procs, p)
 	}
 	if mapsDenied {

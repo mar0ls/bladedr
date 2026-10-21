@@ -129,6 +129,46 @@ func (p *Postgres) UpdateHost(ctx context.Context, h *Host) error {
 	return nil
 }
 
+func (p *Postgres) SetHostOnline(ctx context.Context, id string, lastSeen time.Time, osName, kernel, arch, hostname string) error {
+	ct, err := p.pool.Exec(ctx, `
+		UPDATE hosts SET status=$2, last_seen=$3,
+		  os_name = COALESCE(NULLIF($4, ''), os_name),
+		  kernel = COALESCE(NULLIF($5, ''), kernel),
+		  arch = COALESCE(NULLIF($6, ''), arch),
+		  hostname = COALESCE(hostname, NULLIF($7, ''))
+		WHERE id=$1`,
+		id, StatusOnline, lastSeen, osName, kernel, arch, hostname)
+	if err != nil {
+		return err
+	}
+	if ct.RowsAffected() == 0 {
+		return ErrNotFound{"host", id}
+	}
+	return nil
+}
+
+func (p *Postgres) SetHostUnreachable(ctx context.Context, id string) error {
+	ct, err := p.pool.Exec(ctx, `UPDATE hosts SET status=$2 WHERE id=$1`, id, StatusUnreachable)
+	if err != nil {
+		return err
+	}
+	if ct.RowsAffected() == 0 {
+		return ErrNotFound{"host", id}
+	}
+	return nil
+}
+
+func (p *Postgres) SetHostSSHHostKey(ctx context.Context, id, key string) error {
+	ct, err := p.pool.Exec(ctx, `UPDATE hosts SET ssh_host_key=$2 WHERE id=$1`, id, nullStr(key))
+	if err != nil {
+		return err
+	}
+	if ct.RowsAffected() == 0 {
+		return ErrNotFound{"host", id}
+	}
+	return nil
+}
+
 func (p *Postgres) DeleteHost(ctx context.Context, id string) error {
 	ct, err := p.pool.Exec(ctx, `DELETE FROM hosts WHERE id=$1`, id)
 	if err != nil {

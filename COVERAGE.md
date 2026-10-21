@@ -184,18 +184,86 @@ lockdown, systemd timers, GTFOBins in cron/sudo, initramfs hooks, SELinux-disabl
 
 ## Known limitations
 
-**Process-level rules dedup on `item.exe` alone** (`exec-from-world-writable`,
-`process-ld-preload-env`, and siblings). Two distinct processes that happen to share an
-executable path collapse into one observation, and only the last-evaluated instance's
-evidence survives the upsert — the other instance's distinct value (a different injected
-`LD_PRELOAD`, say) is silently overwritten rather than merged or listed. Detection itself
-isn't lost (the rule still fires), only the evidence of one of the contributing processes.
-Narrow in practice — it needs two *different* processes sharing one binary path to *both*
-match the same rule in the same scan — but real: surfaced on a lab host (2026-10-11) where
-three independent scenarios bare-launched the same helper binary. A proper fix needs a dedup
-key that includes the matched value (or a bounded list of contributing PIDs in evidence),
-across every rule that currently dedups by `item.exe`, which is a wider change than a patch
-release; tracked here rather than fixed under time pressure.
+**`UpdateHost` is a full-row overwrite; admin edits can still race a background
+write.** Resolved 2026-10-21 for the case that actually recurred in practice — a
+scan's own outcome (`SetHostOnline`/`SetHostUnreachable`) and the SSH dial's
+TOFU host-key pinning (`SetHostSSHHostKey`) now go through narrow, single-column
+setters instead of `UpdateHost(ctx, host)`, so two of those racing each other can no
+longer silently revert one write with the other's stale snapshot (`internal/store`:
+`contractHostNarrowUpdatesDoNotRace`, run against both backends). What's still
+open: the host-edit UI (`uiEditHost`) reads a `Host`, lets an operator fill in a
+form, and writes the whole thing back with one `UpdateHost` call. If a scan
+finishes (or a host key gets learned) while that edit is in flight, the edit's
+full-row write can still revert it — same shape of bug, much narrower window
+(needs a human mid-edit, not two automatic processes ~10s apart), not yet fixed.
+
+**A scan reports one status for every collector.** `ok`/`partial` is binary across the
+whole snapshot (collector_errors joined into one scan.error string); there is no per-
+collector success/failure breakdown, so a scan that silently lost one of the ~50
+individual collectors still reads as a clean `ok` unless that specific collector happens
+to be one that already sets collector_errors. Worth doing before 1.0; not started.
+
+Resolved 2026-10-19 (was tracked here as an open limitation): the six process rules that
+dedup on `item.exe` (`deleted-running-binary`, `exec-from-world-writable`,
+`process-library-from-writable-path`, `process-library-deleted`,
+`process-ld-preload-env`, plus `masquerade-kernel-thread`/`process-empty-environ` which
+already keyed on pid) now dedup on `["item.pid", "item.exe"]`, and each carries `ppid`,
+`uid` and (for the path-ambiguous ones) a `ProcessExecutionEvidence` block — the
+executable's sha256, its parent, its cgroup, and a `stable` flag the collector only sets
+when the process and its binary provably did not change mid-collection. Two unrelated
+processes sharing one binary path, each matching the same rule in the same scan (how
+this surfaced originally: three lab scenarios bare-launching the same helper binary),
+now produce two observations with distinct evidence instead of one with whichever ran
+last. See `internal/probe/process_evidence_linux.go` and
+`internal/rules/process_evidence_test.go`.
+
+Resolved 2026-10-20 (threat-model review, five findings, all fixed with tests on both
+darwin and linux):
+
+- **Sensor-supplied verdict/ID/status injection.** `POST /hosts/{id}/events` used to
+  decode the sensor's batch straight into `store.Observation`, so a leaked per-host
+  sensor token could set its own `verdict` (poisoning the ML risk model and the fleet
+  trust gate), `id` (colliding with an unrelated observation), or `status`
+  (self-resolving its own finding). It now decodes into an allowlisted `sensorEvent`
+  type carrying only detection metadata; `HostID`, `Source`, `Status` and `Verdict`
+  stay server-assigned. `Severity`/`Score` stayed allowlisted but unvalidated until a
+  follow-up pass noticed the legitimate sensor only ever sends one of five known
+  severity labels and the matching 0-100 score it derives from that label
+  (`internal/sensor/event.go`: `severityScore`) — a leaked token could otherwise send
+  an arbitrary severity string or out-of-range score, skewing that host's triage
+  display and, while the risk model is untrained, its `Score/100` fallback
+  probability directly. Both are now validated against the same bounds. See
+  `internal/api/api.go` (`sensorEvent`, `ingestEvents`) and
+  `internal/api/ingest_test.go`.
+- **Sensor deploy ran an unverified root-executed binary.** `DeploySensor` uploaded the
+  sensor binary and policy bundle to the scan account's cache dir, then a separate
+  `sudo` step copied and ran them as root with no integrity check — unlike the probe
+  path, which exists specifically to close that swap-after-upload window. `deploy.sh`
+  now takes server-computed sha256 digests and refuses to proceed if either file
+  changed after upload. See `internal/scan/ssh.go` (`verifyDigestScript`,
+  `sensorDeployScript`) and `internal/scan/ssh_sensor_deploy_test.go`.
+- **Sudo password visible in `ps`.** The non-root probe path fed the account's sudo
+  password to `sudo -S` via a literal `printf '%s\n' '<password>' | ...` embedded in
+  the command text sshd hands to the remote shell as its argv — readable by any local
+  account for as long as that process ran. Found again, independently, in `wrapSudo`
+  (shared by `DeploySensor`, `StopSensor` and the response-action runner) while
+  reviewing the first fix — same problem, missed because it's a separate helper. Both
+  now travel only as real SSH stdin, read once into a shell variable. See
+  `internal/scan/ssh.go` (`probeCommand`, `wrapSudo`),
+  `TestProbeCommandDoesNotLeakPasswordInCommandText` and
+  `TestWrapSudoDoesNotLeakPasswordInCommandText`.
+- **Unbounded remote command output.** `run()` captured a scan target's stdout/stderr
+  into plain `bytes.Buffer`s with no size limit, so a compromised or misbehaving host
+  could grow control-plane memory without bound. Output is now capped at 64 MiB per
+  stream; exceeding it fails the command instead of returning a partial result. See
+  `internal/scan/ssh.go` (`capturedOutput`) and `internal/scan/ssh_output_test.go`.
+- **Audit append failures were silently discarded.** `auditAs` ignored
+  `AppendAudit`'s error outright, so an audit backend that was down (disk full, DB
+  unreachable) left no trace that anything had gone unrecorded — every action in that
+  window was effectively unauditable. Failures are now logged and counted in a new
+  `bladedr_audit_append_failures_total` metric; the triggering action still completes; the audit
+  outage just stops being invisible. See `internal/api/auth.go` (`auditAs`),
+  `internal/api/metrics.go`, and `TestAuditFailureIsCountedNotSwallowed`.
 
 ## Phase 2 (eBPF)
 

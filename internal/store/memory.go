@@ -462,6 +462,52 @@ func (m *Memory) UpdateHost(_ context.Context, h *Host) error {
 	return nil
 }
 
+func (m *Memory) SetHostOnline(_ context.Context, id string, lastSeen time.Time, osName, kernel, arch, hostname string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	h, ok := m.hosts[id]
+	if !ok {
+		return ErrNotFound{"host", id}
+	}
+	h.Status = StatusOnline
+	h.LastSeen = &lastSeen
+	if osName != "" {
+		h.OSName = osName
+	}
+	if kernel != "" {
+		h.Kernel = kernel
+	}
+	if arch != "" {
+		h.Arch = arch
+	}
+	if h.Hostname == "" {
+		h.Hostname = hostname
+	}
+	return nil
+}
+
+func (m *Memory) SetHostUnreachable(_ context.Context, id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	h, ok := m.hosts[id]
+	if !ok {
+		return ErrNotFound{"host", id}
+	}
+	h.Status = StatusUnreachable
+	return nil
+}
+
+func (m *Memory) SetHostSSHHostKey(_ context.Context, id, key string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	h, ok := m.hosts[id]
+	if !ok {
+		return ErrNotFound{"host", id}
+	}
+	h.SSHHostKey = key
+	return nil
+}
+
 func (m *Memory) DeleteHost(_ context.Context, id string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

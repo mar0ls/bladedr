@@ -9,6 +9,57 @@ One control-plane host runs `bladedr-server` and talks to Postgres. It reaches t
 fleet over SSH to scan, and (optionally) pushes the eBPF sensor to hosts you want
 runtime coverage on. Nothing but the server needs inbound access.
 
+## Scan locking and process evidence (unreleased)
+
+Builds containing these unreleased changes require `flock` on scanned Linux hosts. The launcher acquires an
+exclusive lock before launching the probe and waits up to 30 seconds; timeout or
+missing `flock` fails the attempt without launching an unlocked collector. The
+normal queue retry policy applies. No service or audit rule is installed.
+
+Root and sudo scans share `/run/bladedr-probe/scan.lock`. Unprivileged scans use
+`/tmp/.bladedr/scan-lock/scan.lock` under the existing scan-account cache. The lock
+directory must be owned by the executing UID and mode `0700`; symlink directories,
+symlink lock files and non-regular lock files are rejected. Lock files remain in
+place between scans; do not remove them while a scan or waiter is running. The
+kernel releases the lock when its last holding descriptor closes. Root and
+unprivileged scans use separate locks; separate mount namespaces or older servers
+that do not use this protocol are not coordinated.
+
+After a remote command returns, the queue worker checks cancellation and renews
+its ownership before ingesting the result. A superseded attempt records a failed
+scan with `discarded scan result`, without ingesting findings or changing host
+reachability. This is an ingestion-boundary check, not a transaction spanning
+every subsequent observation write.
+
+For executables under `/tmp`, `/var/tmp` and `/dev/shm`, and deleted file-backed
+executables outside those directories, the new probe collects
+`execution_evidence`: SHA-256 via `/proc/PID/exe`, process start ticks, PPID,
+session ID, parent executable, cgroup, and executable/ancestor UID, GID and mode.
+Modes include file-type bits. Ancestors are sampled through the target's mount
+namespace; ACLs and effective access are not evaluated. Raw command arguments
+and environment variables are not added to this evidence.
+
+Both categories share a limit of eight candidate processes per scan and 64 MiB
+per hash. Anonymous memfd executables are not added to this evidence collection.
+Exceeded limits, missing permissions and vanished processes produce evidence
+errors, not a benign verdict. `stable` records agreement of the sampled process
+identity and executable metadata before/after collection; it does not establish
+trust or provide an atomic snapshot. A detected identity change clears the hash.
+The existing rule ID `exec-from-world-writable` still means a temporary-path
+match, not proof that the executable or its immediate directory is writable by
+everyone. Its matching logic and analyst verdicts are unchanged.
+
+For a deleted executable, the hash describes the running inode opened through
+`/proc/PID/exe`, not a replacement now installed at the original path. Package
+history and a trusted reference binary are still needed to attribute an update;
+an executable name or a stable hash alone does not establish a benign verdict.
+
+Deploy both server and probes for the complete change. External rule files or
+stored overrides of `exec-from-world-writable` and `deleted-running-binary` need
+the new `execution` evidence expression to expose these details. Older probes
+still match the rule without the new fields.
+Existing historical findings cannot acquire evidence for processes already gone.
+
 ## Database
 
 Use ParadeDB (Postgres + pg_search) — the free-text search relies on the BM25 index.

@@ -19,8 +19,8 @@ import (
 )
 
 // SSHTransport uploads the probe binary + rule bundle to a remote host over SSH,
-// runs the probe once, captures its stdout, then removes everything. This is the
-// agentless production path: nothing persistent is left on the host.
+// runs the probe once and captures stdout. The binary cache and scan lock remain;
+// per-scan bundles and privileged temporary copies are removed on normal exit.
 type SSHTransport struct {
 	Addr string // host:port
 	User string
@@ -202,8 +202,8 @@ func (t *SSHTransport) RunProbe(ctx context.Context, bundle probe.RuleBundle, em
 	}
 
 	bundleSum := sha256.Sum256(bundleJSON)
-	cmd := probeCommand(t.User, t.SudoPassword, probePath, digest, bundlePath, hex.EncodeToString(bundleSum[:]), emitSnapshot)
-	out, err := run(client, cmd, nil)
+	cmd, cmdStdin := probeCommand(t.User, t.SudoPassword, probePath, digest, bundlePath, hex.EncodeToString(bundleSum[:]), emitSnapshot)
+	out, err := run(client, cmd, cmdStdin)
 	if err != nil {
 		return res, fmt.Errorf("run probe: %w", err)
 	}
@@ -236,21 +236,43 @@ func pruneStaleProbes(dir, keep string) string {
 // the unprivileged scan it got before. `sudo -l sh` asks whether escalation is allowed
 // without running anything, so an account outside sudoers doesn't log an incident on
 // every scheduled scan.
-func probeCommand(user, sudoPW, probePath, probeDigest, bundlePath, bundleDigest string, emitSnapshot bool) string {
+//
+// When a password is needed, probeCommand returns it as a second value instead of
+// folding it into the returned command string: sshd hands the command text to the
+// remote shell as its argv, which any local account can read off that process in
+// `ps` for as long as it runs. The caller must pipe the returned reader into the
+// session as real stdin (see run); the script reads it once with `read -r PW` and
+// keeps it only in a shell variable, which does not appear in argv.
+func probeCommand(user, sudoPW, probePath, probeDigest, bundlePath, bundleDigest string, emitSnapshot bool) (cmd string, stdin io.Reader) {
 	args := ""
 	if emitSnapshot {
 		args = " --emit-snapshot"
 	}
 	direct := probePath + " --rules " + bundlePath + args
 	if user == "root" {
-		return direct
+		return "sh -c " + shellArg(lockedProbeScript("/run/bladedr-probe", direct)), nil
 	}
+	direct = "sh -c " + shellArg(lockedProbeScript(probeCacheDir+"/scan-lock", direct))
 	priv := shellArg(privilegedProbeScript(probePath, probeDigest, bundlePath, bundleDigest, args))
 	if sudoPW == "" {
-		return "if sudo -n -l sh >/dev/null 2>&1; then sudo -n sh -c " + priv + "; else " + direct + "; fi"
+		return "if sudo -n -l sh >/dev/null 2>&1; then sudo -n sh -c " + priv + "; else " + direct + "; fi", nil
 	}
-	feed := "printf '%s\\n' " + shellArg(sudoPW) + " | "
-	return "if " + feed + "sudo -S -p '' -l sh >/dev/null 2>&1; then " + feed + "sudo -S -p '' sh -c " + priv + "; else " + direct + "; fi"
+	script := `read -r PW
+feed() { printf '%s\n' "$PW"; }
+if feed | sudo -S -p '' -l sh >/dev/null 2>&1; then feed | sudo -S -p '' sh -c ` + priv + `; else ` + direct + `; fi`
+	return "sh -c " + shellArg(script), strings.NewReader(sudoPW + "\n")
+}
+
+// verifyDigestScript guards a step that is about to read or run bytes staged in a
+// directory the scan account (not root) controls: it refuses to continue unless
+// fileExpr's sha256 matches digestExpr, both already shell-quoted (a variable
+// reference like `"$B/sensor"` or a shellArg-escaped literal). sensorDeployScript
+// runs this immediately before copying the sensor binary into a root-owned path
+// and before extracting the policy bundle — the same upload-then-sudo-run gap
+// privilegedProbeScript closes for the probe path, where the digest is likewise
+// server-computed and checked just before the privileged step that trusts it.
+func verifyDigestScript(fileExpr, digestExpr, what string) string {
+	return `[ "$(sha256sum ` + fileExpr + ` | cut -d' ' -f1)" = ` + digestExpr + ` ] || { echo "` + what + ` changed after upload; refusing to use it" >&2; exit 1; }`
 }
 
 // privilegedProbeScript runs as root. The cache directory belongs to the scan account,
@@ -260,33 +282,100 @@ func probeCommand(user, sudoPW, probePath, probeDigest, bundlePath, bundleDigest
 // against the digests the server computed before anything executes; a mismatch fails
 // the scan rather than falling back, because it means something rewrote the probe.
 func privilegedProbeScript(probePath, probeDigest, bundlePath, bundleDigest, args string) string {
-	return `d=$(mktemp -d) || exit 1
+	return lockedProbeScript("/run/bladedr-probe", `d=$(mktemp -d) || exit 1
 trap 'rm -rf "$d"' EXIT
-cp ` + probePath + ` "$d/probe" && cp ` + bundlePath + ` "$d/rules.json" || exit 1
-[ "$(sha256sum "$d/probe" "$d/rules.json" | cut -d' ' -f1 | tr '\n' ' ')" = "` + probeDigest + ` ` + bundleDigest + ` " ] || { echo "probe or rule bundle changed after upload; refusing to run it as root" >&2; exit 1; }
-"$d/probe" --rules "$d/rules.json"` + args
+cp `+probePath+` "$d/probe" && cp `+bundlePath+` "$d/rules.json" || exit 1
+[ "$(sha256sum "$d/probe" "$d/rules.json" | cut -d' ' -f1 | tr '\n' ' ')" = "`+probeDigest+` `+bundleDigest+` " ] || { echo "probe or rule bundle changed after upload; refusing to run it as root" >&2; exit 1; }
+"$d/probe" --rules "$d/rules.json"`+args)
+}
+
+// The remote lock survives a control-plane sleep or lease reclaim. Acquire it
+// before starting the probe so a waiting attempt cannot appear in /proc as a
+// second collector. Never unlink the lock file: waiters must share its inode.
+//
+// Polled with `flock -n`, not `flock -w`: busybox's flock (Alpine and other
+// minimal images) implements -s/-x/-u/-n but not -w, so a target running it
+// instead of util-linux would fail every scan with "unrecognized option" before
+// the probe ever ran. -n (fail immediately) is the one wait-related flag both
+// implementations agree on, so a 30s wait is built from 300 of those at 100ms.
+func lockedProbeScript(dir, command string) string {
+	return cacheDirScript(dir) + `
+umask 077
+[ ! -L "$d/scan.lock" ] && { [ ! -e "$d/scan.lock" ] || [ -f "$d/scan.lock" ]; } || { echo "unsafe scan lock" >&2; exit 1; }
+exec 9>>"$d/scan.lock"
+i=0
+while ! flock -n 9; do
+  i=$((i + 1))
+  [ "$i" -ge 300 ] && { echo "probe lock unavailable" >&2; exit 75; }
+  sleep 0.1
+done
+` + command
+}
+
+// maxRemoteOutputBytes bounds how much of a single remote command's stdout or
+// stderr run() keeps in memory. A scan target is not fully trusted (it may be
+// compromised, or just a probe gone wrong), and the control plane runs commands
+// against many of them, often concurrently; without a cap, one host returning an
+// unbounded stream — accidentally or as a deliberate denial-of-service attempt —
+// would grow server memory without limit. A legitimate snapshot's JSON is low
+// single-digit MiB today, so 64 MiB leaves ample headroom while still being far
+// short of "unbounded."
+const maxRemoteOutputBytes = 64 << 20
+
+// capturedOutput keeps up to limit bytes written to it and discards the rest,
+// recording that truncation happened instead of silently handing the caller a
+// partial result it could misinterpret as complete.
+type capturedOutput struct {
+	buf       bytes.Buffer
+	limit     int
+	written   int
+	truncated bool
+}
+
+func (c *capturedOutput) Write(p []byte) (int, error) {
+	c.written += len(p)
+	if c.written > c.limit {
+		c.truncated = true
+	}
+	if room := c.limit - c.buf.Len(); room > 0 {
+		keep := p
+		if len(keep) > room {
+			keep = keep[:room]
+		}
+		c.buf.Write(keep)
+	}
+	return len(p), nil
 }
 
 // run executes a single command in its own session, optionally piping stdin, and
 // returns stdout. When stdin is provided it is copied through an explicit
 // StdinPipe that is closed afterward, so the remote command sees EOF (important
 // for streaming a multi-MB probe binary through `cat`). Stderr is folded into
-// the returned error.
+// the returned error. Output beyond maxRemoteOutputBytes on either stream fails
+// the command rather than returning a silently truncated result.
 func run(client *ssh.Client, cmd string, stdin io.Reader) ([]byte, error) {
 	sess, err := client.NewSession()
 	if err != nil {
 		return nil, err
 	}
 	defer sess.Close()
-	var out, errb bytes.Buffer
-	sess.Stdout = &out
-	sess.Stderr = &errb
+	out := &capturedOutput{limit: maxRemoteOutputBytes}
+	errb := &capturedOutput{limit: maxRemoteOutputBytes}
+	sess.Stdout = out
+	sess.Stderr = errb
+
+	finish := func(runErr error) ([]byte, error) {
+		if out.truncated || errb.truncated {
+			return nil, fmt.Errorf("remote command output exceeded %d bytes; refusing a truncated result", maxRemoteOutputBytes)
+		}
+		if runErr != nil {
+			return out.buf.Bytes(), fmt.Errorf("%w: %s", runErr, strings.TrimSpace(errb.buf.String()))
+		}
+		return out.buf.Bytes(), nil
+	}
 
 	if stdin == nil {
-		if err := sess.Run(cmd); err != nil {
-			return out.Bytes(), fmt.Errorf("%w: %s", err, strings.TrimSpace(errb.String()))
-		}
-		return out.Bytes(), nil
+		return finish(sess.Run(cmd))
 	}
 
 	wc, err := sess.StdinPipe()
@@ -301,10 +390,7 @@ func run(client *ssh.Client, cmd string, stdin io.Reader) ([]byte, error) {
 		return nil, err
 	}
 	wc.Close()
-	if err := sess.Wait(); err != nil {
-		return out.Bytes(), fmt.Errorf("%w: %s", err, strings.TrimSpace(errb.String()))
-	}
-	return out.Bytes(), nil
+	return finish(sess.Wait())
 }
 
 func randHex(n int) string {
@@ -337,6 +423,15 @@ func (t *SSHTransport) dial(ctx context.Context) (*ssh.Client, error) {
 // when password-auth) lets a non-root SSH user escalate via `sudo -S`; for a root
 // or NOPASSWD user pass "". The privileged script runs under one sudo so its
 // docker/tetragon/sensor steps don't each re-prompt.
+//
+// The sensor binary and policy bundle are uploaded to the same scan-account-owned
+// staging directory the probe path uses, then referenced by a later, separate
+// root-run script — the same upload-then-sudo-run shape privilegedProbeScript
+// exists to protect: a window during which anyone holding the scan account, but
+// not its sudo password, could swap the staged file and have the next root step
+// run or load their substitute instead. So deploy.sh gets the same server-computed
+// digests probeCommand already passes for the probe path, and checks them itself,
+// as root, right before each file is used.
 func (t *SSHTransport) DeploySensor(ctx context.Context, sensorBin, policyTar []byte, serverURL, hostID, ingestToken, sudoPW string) error {
 	client, err := t.dial(ctx)
 	if err != nil {
@@ -364,8 +459,11 @@ func (t *SSHTransport) DeploySensor(ctx context.Context, sensorBin, policyTar []
 	if _, err := run(client, "cat > /tmp/.bladedr/deploy.sh", strings.NewReader(sensorDeployScript)); err != nil {
 		return fmt.Errorf("upload script: %w", err)
 	}
-	cmd := wrapSudo(sudoPW, "sh /tmp/.bladedr/deploy.sh "+shellArg(serverURL)+" "+shellArg(hostID))
-	if out, err := run(client, cmd, nil); err != nil {
+	sensorSum := sha256.Sum256(sensorBin)
+	policySum := sha256.Sum256(policyTar)
+	cmd, cmdStdin := wrapSudo(sudoPW, "sh /tmp/.bladedr/deploy.sh "+shellArg(serverURL)+" "+shellArg(hostID)+
+		" "+shellArg(hex.EncodeToString(sensorSum[:]))+" "+shellArg(hex.EncodeToString(policySum[:])))
+	if out, err := run(client, cmd, cmdStdin); err != nil {
 		return fmt.Errorf("deploy: %w (%s)", err, strings.TrimSpace(string(out)))
 	}
 	return nil
@@ -393,8 +491,8 @@ fi
 pkill -f '[/]opt/bladedr/sensor' 2>/dev/null || true
 pkill -f '[/]tmp/.bladedr/sensor' 2>/dev/null || true
 echo "left=$(docker ps -q -f name=bladedr-tetragon | wc -l)"`
-	cmd := wrapSudo(sudoPW, stop)
-	out, err := run(client, cmd, nil)
+	cmd, cmdStdin := wrapSudo(sudoPW, stop)
+	out, err := run(client, cmd, cmdStdin)
 	if err != nil {
 		return fmt.Errorf("stop sensor: %w (%s)", err, bytes.TrimSpace(out))
 	}
@@ -404,11 +502,15 @@ echo "left=$(docker ps -q -f name=bladedr-tetragon | wc -l)"`
 	return nil
 }
 
-// wrapSudo runs cmd as root: when a password is given it is piped to `sudo -S`;
-// otherwise cmd runs as-is (the SSH user is root or has passwordless sudo inside).
-func wrapSudo(pw, cmd string) string {
+// wrapSudo runs cmd as root: when a password is given, it is read once from real
+// SSH stdin into a shell variable and piped to `sudo -S` from there, never folded
+// into the returned command text — the same reasoning as probeCommand's doc
+// comment: sshd hands that text to the remote shell as its argv, which any local
+// account can read off that process in `ps` for as long as it runs. Otherwise cmd
+// runs as-is (the SSH user is root or has passwordless sudo inside).
+func wrapSudo(pw, cmd string) (string, io.Reader) {
 	if pw == "" {
-		return cmd
+		return cmd, nil
 	}
 	// sh -c, and cmd as a single quoted argument. Without it the remote shell splits a
 	// compound command on the first ";" and hands sudo only the fragment before it: the
@@ -416,7 +518,9 @@ func wrapSudo(pw, cmd string) string {
 	// is not a theoretical parse — kill_process built "pid=1234; if [ ... ]" and sudo
 	// took "pid=1234" as an environment assignment, so the guard compared an empty pid
 	// and refused every kill on a password-sudo host.
-	return "printf '%s\\n' " + shellArg(pw) + " | sudo -S sh -c " + shellArg(cmd)
+	script := `read -r PW
+printf '%s\n' "$PW" | sudo -S sh -c ` + shellArg(cmd)
+	return "sh -c " + shellArg(script), strings.NewReader(pw + "\n")
 }
 
 // shellArg single-quotes a string for safe use in a remote shell command.
@@ -432,14 +536,17 @@ func shellArg(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`)
 // the script reads and immediately unlinks, then writes into a mode-0600
 // EnvironmentFile. Passing it in argv would expose it in `ps` on the target for the
 // length of the deployment, and the unit file itself is world-readable.
-const sensorDeployScript = `#!/bin/sh
+var sensorDeployScript = `#!/bin/sh
 set -u
-SERVER="${1:?server url}"; HOSTID="${2:?host id}"
+SERVER="${1:?server url}"; HOSTID="${2:?host id}"; SENSOR_DIGEST="${3:?sensor digest}"; POLICY_DIGEST="${4:?policy digest}"
 SRC=/tmp/.bladedr; B=/opt/bladedr
 TOKEN=$(cat "$SRC/sensor-token") || { echo "sensor credential missing"; exit 1; }
 rm -f "$SRC/sensor-token"
+` + verifyDigestScript(`"$SRC/policies.tgz"`, `"$POLICY_DIGEST"`, "policy bundle") + `
 mkdir -p "$B/policies" "$B/off" "$B/export"
-cp "$SRC/sensor" "$B/sensor"; chmod 0755 "$B/sensor"
+cp "$SRC/sensor" "$B/sensor"
+` + verifyDigestScript(`"$B/sensor"`, `"$SENSOR_DIGEST"`, "sensor binary") + `
+chmod 0755 "$B/sensor"
 rm -rf "$B/policies"/* "$B/off"/*
 tar xzf "$SRC/policies.tgz" -C "$B/policies" 2>/dev/null || { echo "untar failed"; exit 1; }
 cd "$B/policies" || exit 1

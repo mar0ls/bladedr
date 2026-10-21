@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 
 	"bladedr/internal/secrets"
@@ -79,5 +80,24 @@ func TestViewerCannotCreateCredential(t *testing.T) {
 	})
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("viewer create credential = %d, want 403", w.Code)
+	}
+}
+
+func TestCreateCredentialRejectsSSHAgent(t *testing.T) {
+	// ssh_agent is a real auth_type value (the DB schema and OpenAPI accept it), but
+	// scan.AuthFor has no case for it, so a credential created with it would seal fine
+	// and then fail every scan with "unsupported auth type" — discovered only at scan
+	// time, not at creation. It must be rejected here instead, with a message that says
+	// why, not just "invalid auth_type" (it isn't invalid input, it's unimplemented).
+	a, tok := newTestAPI(t)
+	withCrypto(t, a)
+	w := do(a, "POST", "/api/v1/credentials", tok[store.RoleAdmin], map[string]any{
+		"username": "root", "secret": "x", "auth_type": "ssh_agent",
+	})
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("ssh_agent auth_type = %d, want 400 (%s)", w.Code, w.Body)
+	}
+	if !strings.Contains(w.Body.String(), "not implemented") {
+		t.Errorf("rejection should say ssh_agent isn't implemented, not just reject it: %s", w.Body)
 	}
 }

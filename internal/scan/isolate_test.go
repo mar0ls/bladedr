@@ -26,7 +26,9 @@ func TestIsolateLoadsItsRulesetInOneTransaction(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "nft"), []byte(stub), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	c := exec.Command("/bin/sh", "-c", wrapSudo("pw", cmd))
+	wrapped, stdin := wrapSudo("pw", cmd)
+	c := exec.Command("/bin/sh", "-c", wrapped)
+	c.Stdin = stdin
 	sudo := "#!/bin/sh\n[ \"$1\" = \"-S\" ] && shift\ncat >/dev/null\nexec \"$@\"\n"
 	os.WriteFile(filepath.Join(dir, "sudo"), []byte(sudo), 0o755)
 	c.Env = append(os.Environ(), "PATH="+dir+":"+os.Getenv("PATH"))

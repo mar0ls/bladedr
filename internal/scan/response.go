@@ -80,7 +80,8 @@ func (r *Runner) ExecuteResponse(ctx context.Context, action *store.ResponseActi
 		return "", err
 	}
 	defer client.Close()
-	output, err := run(client, wrapSudo(sudoPassword, command), nil)
+	cmd, cmdStdin := wrapSudo(sudoPassword, command)
+	output, err := run(client, cmd, cmdStdin)
 	if len(output) > 64<<10 {
 		output = append(output[:64<<10], []byte("\n[output truncated]")...)
 	}

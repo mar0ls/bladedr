@@ -3,6 +3,7 @@ package scan
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -10,6 +11,71 @@ import (
 	"bladedr/internal/rules"
 	"bladedr/internal/store"
 )
+
+type deferredTransport struct {
+	started chan struct{}
+	release chan struct{}
+	err     error
+}
+
+func (t deferredTransport) RunProbe(context.Context, probe.RuleBundle, bool) (probe.ScanResult, error) {
+	close(t.started)
+	<-t.release // Simulate a remote command that outlives ownership/cancellation.
+	return probe.ScanResult{Findings: []probe.Finding{{RuleID: "test", DedupKey: "stale"}}}, t.err
+}
+
+func TestQueueDiscardsResultsAfterClockJumpAndReclaim(t *testing.T) {
+	for _, remoteErr := range []error{nil, errors.New("old SSH connection closed")} {
+		t.Run(fmt.Sprint(remoteErr), func(t *testing.T) {
+			ctx := context.Background()
+			st := store.NewMemory()
+			h := &store.Host{Hostname: "host", Status: store.StatusOnline}
+			if err := st.CreateHost(ctx, h); err != nil {
+				t.Fatal(err)
+			}
+			tr := deferredTransport{started: make(chan struct{}), release: make(chan struct{}), err: remoteErr}
+			r := &Runner{Store: st, LoadRules: func(context.Context) ([]rules.Rule, error) { return []rules.Rule{{ID: "test"}}, nil }, NewTransport: func(*store.Host) (Transport, error) { return tr, nil }}
+			q := &Queue{Store: st, Runner: r}
+			job, err := q.Enqueue(ctx, h, store.TriggerAPI)
+			if err != nil {
+				t.Fatal(err)
+			}
+			done := make(chan error, 1)
+			go func() { _, err := q.RunOne(ctx); done <- err }()
+			select {
+			case <-tr.started:
+			case <-time.After(3 * time.Second):
+				t.Fatal("transport did not start")
+			}
+			// Advance only the durable lease clock; the old remote call still runs.
+			claimed, err := st.ClaimScanJob(ctx, "replacement", time.Now().Add(time.Hour), time.Minute)
+			close(tr.release)
+			if err != nil || claimed.ID != job.ID {
+				t.Fatalf("reclaim: %+v %v", claimed, err)
+			}
+			select {
+			case err := <-done:
+				if err == nil {
+					t.Fatal("stale worker completed")
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("worker did not return")
+			}
+			obs, _ := st.ListObservations(ctx, store.ObservationFilter{HostID: h.ID})
+			if len(obs) != 0 {
+				t.Fatalf("stale observations persisted: %+v", obs)
+			}
+			current, _ := st.GetHost(ctx, h.ID)
+			if current.Status != store.StatusOnline {
+				t.Fatalf("old failure changed host: %s", current.Status)
+			}
+			currentJob, _ := st.GetScanJob(ctx, job.ID)
+			if currentJob.Status != store.ScanJobRunning {
+				t.Fatalf("replacement job modified: %+v", currentJob)
+			}
+		})
+	}
+}
 
 func TestQueueEnqueueIsPerHostIdempotent(t *testing.T) {
 	ctx := context.Background()
