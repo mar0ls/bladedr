@@ -461,9 +461,9 @@ func (t *SSHTransport) DeploySensor(ctx context.Context, sensorBin, policyTar []
 	}
 	sensorSum := sha256.Sum256(sensorBin)
 	policySum := sha256.Sum256(policyTar)
-	cmd := wrapSudo(sudoPW, "sh /tmp/.bladedr/deploy.sh "+shellArg(serverURL)+" "+shellArg(hostID)+
+	cmd, cmdStdin := wrapSudo(sudoPW, "sh /tmp/.bladedr/deploy.sh "+shellArg(serverURL)+" "+shellArg(hostID)+
 		" "+shellArg(hex.EncodeToString(sensorSum[:]))+" "+shellArg(hex.EncodeToString(policySum[:])))
-	if out, err := run(client, cmd, nil); err != nil {
+	if out, err := run(client, cmd, cmdStdin); err != nil {
 		return fmt.Errorf("deploy: %w (%s)", err, strings.TrimSpace(string(out)))
 	}
 	return nil
@@ -491,8 +491,8 @@ fi
 pkill -f '[/]opt/bladedr/sensor' 2>/dev/null || true
 pkill -f '[/]tmp/.bladedr/sensor' 2>/dev/null || true
 echo "left=$(docker ps -q -f name=bladedr-tetragon | wc -l)"`
-	cmd := wrapSudo(sudoPW, stop)
-	out, err := run(client, cmd, nil)
+	cmd, cmdStdin := wrapSudo(sudoPW, stop)
+	out, err := run(client, cmd, cmdStdin)
 	if err != nil {
 		return fmt.Errorf("stop sensor: %w (%s)", err, bytes.TrimSpace(out))
 	}
@@ -502,11 +502,15 @@ echo "left=$(docker ps -q -f name=bladedr-tetragon | wc -l)"`
 	return nil
 }
 
-// wrapSudo runs cmd as root: when a password is given it is piped to `sudo -S`;
-// otherwise cmd runs as-is (the SSH user is root or has passwordless sudo inside).
-func wrapSudo(pw, cmd string) string {
+// wrapSudo runs cmd as root: when a password is given, it is read once from real
+// SSH stdin into a shell variable and piped to `sudo -S` from there, never folded
+// into the returned command text — the same reasoning as probeCommand's doc
+// comment: sshd hands that text to the remote shell as its argv, which any local
+// account can read off that process in `ps` for as long as it runs. Otherwise cmd
+// runs as-is (the SSH user is root or has passwordless sudo inside).
+func wrapSudo(pw, cmd string) (string, io.Reader) {
 	if pw == "" {
-		return cmd
+		return cmd, nil
 	}
 	// sh -c, and cmd as a single quoted argument. Without it the remote shell splits a
 	// compound command on the first ";" and hands sudo only the fragment before it: the
@@ -514,7 +518,9 @@ func wrapSudo(pw, cmd string) string {
 	// is not a theoretical parse — kill_process built "pid=1234; if [ ... ]" and sudo
 	// took "pid=1234" as an environment assignment, so the guard compared an empty pid
 	// and refused every kill on a password-sudo host.
-	return "printf '%s\\n' " + shellArg(pw) + " | sudo -S sh -c " + shellArg(cmd)
+	script := `read -r PW
+printf '%s\n' "$PW" | sudo -S sh -c ` + shellArg(cmd)
+	return "sh -c " + shellArg(script), strings.NewReader(pw + "\n")
 }
 
 // shellArg single-quotes a string for safe use in a remote shell command.

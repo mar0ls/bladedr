@@ -193,7 +193,12 @@ Dataflow(
         "-- the same upload-then-sudo-run gap the probe path's digest check exists to "
         "close, left open here until fixed 2026-10-20: deploy.sh now takes "
         "server-computed sha256 digests and refuses to proceed if either file changed "
-        "after upload (TestSensorDeployScriptRejectsTamperedSensorBinary)."
+        "after upload (TestSensorDeployScriptRejectsTamperedSensorBinary). This flow's "
+        "own sudo escalation goes through wrapSudo, which had the same argv-visible "
+        "password problem as probeCommand (see the probe-launch flow's note) until the "
+        "same review pass fixed it there too -- caught by re-reading every wrapSudo "
+        "call site, not limited to the one already fixed "
+        "(TestWrapSudoDoesNotLeakPasswordInCommandText)."
     ),
 )
 

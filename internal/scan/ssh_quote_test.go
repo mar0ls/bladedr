@@ -1,6 +1,7 @@
 package scan
 
 import (
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -43,25 +44,38 @@ func TestShellArgRoundTrip(t *testing.T) {
 
 func TestWrapSudoNoPassword(t *testing.T) {
 	// Empty password: command runs as-is (root SSH user or NOPASSWD sudo).
-	if got := wrapSudo("", "whoami"); got != "whoami" {
+	got, stdin := wrapSudo("", "whoami")
+	if got != "whoami" {
 		t.Fatalf("wrapSudo without password should pass the command through, got %q", got)
+	}
+	if stdin != nil {
+		t.Fatal("no password means nothing to feed over stdin")
 	}
 }
 
-func TestWrapSudoPipesQuotedPassword(t *testing.T) {
-	got := wrapSudo("p@ss'word", "id")
+// TestWrapSudoDoesNotLeakPasswordInCommandText is the regression test for the same
+// finding fixed in probeCommand: sshd hands the returned command text to the remote
+// shell as its argv, which any local account can read off that process in `ps` for
+// as long as it runs. The password must travel only as real stdin, never as a
+// literal (however carefully quoted) inside the command string.
+func TestWrapSudoDoesNotLeakPasswordInCommandText(t *testing.T) {
+	const pw = "p@ss'word"
+	got, stdin := wrapSudo(pw, "id")
+	if strings.Contains(got, pw) {
+		t.Fatalf("password leaked into command text (visible to any local account via ps): %q", got)
+	}
 	if !strings.Contains(got, "sudo -S sh -c") {
 		t.Fatalf("wrapSudo should run the command under sh -c: %q", got)
 	}
-	if !strings.HasPrefix(got, "printf ") {
-		t.Fatalf("wrapSudo should feed the password via printf: %q", got)
+	if stdin == nil {
+		t.Fatal("a password-escalation command must carry the password as stdin")
 	}
-	// The password contains a single quote; it must be shell-escaped, not left raw.
-	if strings.Contains(got, "p@ss'word |") || strings.Contains(got, "'p@ss'word'") {
-		t.Fatalf("password not safely quoted: %q", got)
+	fed, err := io.ReadAll(stdin)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(got, shellArg("p@ss'word")) {
-		t.Fatalf("password should be passed through shellArg: %q", got)
+	if string(fed) != pw+"\n" {
+		t.Fatalf("stdin = %q, want the password newline-terminated", fed)
 	}
 }
 
@@ -84,7 +98,9 @@ func TestWrapSudoKeepsCompoundCommandsIntact(t *testing.T) {
 
 	// The shape kill_process builds: an assignment, then statements that depend on it.
 	cmd := `pid=4242; printf 'saw pid=%s\n' "$pid"; [ -n "$pid" ] || exit 1`
-	sh := exec.Command("/bin/sh", "-c", wrapSudo("secret", cmd))
+	wrapped, stdin := wrapSudo("secret", cmd)
+	sh := exec.Command("/bin/sh", "-c", wrapped)
+	sh.Stdin = stdin
 	sh.Env = append(os.Environ(), "PATH="+dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	out, err := sh.CombinedOutput()
 	if err != nil {

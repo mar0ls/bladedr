@@ -91,3 +91,37 @@ func TestIngestEventsIgnoresServerControlledFields(t *testing.T) {
 		t.Errorf("count = %d, want store-managed count, not sensor-supplied 999", o.Count)
 	}
 }
+
+// TestIngestEventsRejectsOutOfBandSeverityAndScore is the regression test for the
+// gap that survived the field-allowlisting fix above: Severity and Score are
+// allowlisted sensor-supplied fields, but the legitimate sensor only ever sends one
+// of five known severity labels and the matching 0-100 score it computes from that
+// label (internal/sensor/event.go: severityScore). A leaked token could otherwise
+// send any string as severity, or a score outside 0-100, distorting that host's
+// triage display and -- while the risk model is untrained -- skewing its fallback
+// probability, which reads Score/100 as-is.
+func TestIngestEventsRejectsOutOfBandSeverityAndScore(t *testing.T) {
+	a, tokens := newTestAPI(t)
+	ctx := context.Background()
+	h := &store.Host{Hostname: "sensor-host", PrimaryIP: "10.0.0.12"}
+	if err := a.Store.CreateHost(ctx, h); err != nil {
+		t.Fatal(err)
+	}
+	payload := []map[string]any{
+		{"rule_id": "exec-tmp", "dedup_key": "bad-severity", "severity": "pwned", "score": 50},
+		{"rule_id": "exec-tmp", "dedup_key": "bad-score-high", "severity": "high", "score": 999999},
+		{"rule_id": "exec-tmp", "dedup_key": "bad-score-negative", "severity": "high", "score": -1},
+		{"rule_id": "exec-tmp", "dedup_key": "good", "severity": "high", "score": 75},
+	}
+	w := do(a, "POST", "/api/v1/hosts/"+h.ID+"/events", tokens["operator"], payload)
+	if w.Code != 200 {
+		t.Fatalf("ingest events = %d (%s)", w.Code, w.Body)
+	}
+	obs, err := a.Store.ListObservations(ctx, store.ObservationFilter{HostID: h.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(obs) != 1 || obs[0].DedupKey != "good" {
+		t.Fatalf("only the valid event should have been ingested, got %+v", obs)
+	}
+}

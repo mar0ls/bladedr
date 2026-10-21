@@ -960,6 +960,21 @@ func (a *API) ingestEvents(w http.ResponseWriter, r *http.Request) {
 		if e.RuleID == "" || e.DedupKey == "" {
 			continue
 		}
+		// The legitimate sensor only ever sends one of these five labels and the
+		// matching fixed score (internal/sensor/event.go: severityScore) computed
+		// from its own loaded policy bundle, so this rejects nothing genuine. A
+		// leaked token could otherwise set an arbitrary Severity string or an
+		// out-of-band Score, distorting that host's triage display and (while the
+		// risk model is untrained) directly skewing its fallback probability,
+		// which reads Score/100 as-is.
+		switch e.Severity {
+		case rules.SevInfo, rules.SevLow, rules.SevMedium, rules.SevHigh, rules.SevCritical:
+		default:
+			continue
+		}
+		if e.Score < 0 || e.Score > 100 {
+			continue
+		}
 		o := store.Observation{
 			HostID:   host.ID,
 			Source:   store.SourceEBPFSensor,
