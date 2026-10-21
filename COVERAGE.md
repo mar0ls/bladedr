@@ -226,7 +226,14 @@ darwin and linux):
   trust gate), `id` (colliding with an unrelated observation), or `status`
   (self-resolving its own finding). It now decodes into an allowlisted `sensorEvent`
   type carrying only detection metadata; `HostID`, `Source`, `Status` and `Verdict`
-  stay server-assigned. See `internal/api/api.go` (`sensorEvent`, `ingestEvents`) and
+  stay server-assigned. `Severity`/`Score` stayed allowlisted but unvalidated until a
+  follow-up pass noticed the legitimate sensor only ever sends one of five known
+  severity labels and the matching 0-100 score it derives from that label
+  (`internal/sensor/event.go`: `severityScore`) — a leaked token could otherwise send
+  an arbitrary severity string or out-of-range score, skewing that host's triage
+  display and, while the risk model is untrained, its `Score/100` fallback
+  probability directly. Both are now validated against the same bounds. See
+  `internal/api/api.go` (`sensorEvent`, `ingestEvents`) and
   `internal/api/ingest_test.go`.
 - **Sensor deploy ran an unverified root-executed binary.** `DeploySensor` uploaded the
   sensor binary and policy bundle to the scan account's cache dir, then a separate
@@ -238,9 +245,13 @@ darwin and linux):
 - **Sudo password visible in `ps`.** The non-root probe path fed the account's sudo
   password to `sudo -S` via a literal `printf '%s\n' '<password>' | ...` embedded in
   the command text sshd hands to the remote shell as its argv — readable by any local
-  account for as long as that process ran. It now travels only as real SSH stdin,
-  read once into a shell variable. See `internal/scan/ssh.go` (`probeCommand`) and
-  `TestProbeCommandDoesNotLeakPasswordInCommandText`.
+  account for as long as that process ran. Found again, independently, in `wrapSudo`
+  (shared by `DeploySensor`, `StopSensor` and the response-action runner) while
+  reviewing the first fix — same problem, missed because it's a separate helper. Both
+  now travel only as real SSH stdin, read once into a shell variable. See
+  `internal/scan/ssh.go` (`probeCommand`, `wrapSudo`),
+  `TestProbeCommandDoesNotLeakPasswordInCommandText` and
+  `TestWrapSudoDoesNotLeakPasswordInCommandText`.
 - **Unbounded remote command output.** `run()` captured a scan target's stdout/stderr
   into plain `bytes.Buffer`s with no size limit, so a compromised or misbehaving host
   could grow control-plane memory without bound. Output is now capped at 64 MiB per

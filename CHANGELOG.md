@@ -32,10 +32,17 @@ versions follow [SemVer](https://semver.org).
   integrity check — the same upload-then-sudo-run window the probe path's digest
   check exists to close, just left open here. `deploy.sh` now takes server-computed
   sha256 digests and refuses to proceed if either file changed after upload.
-- The non-root probe path fed the account's sudo password to `sudo -S` embedded in
-  the command text sshd hands the remote shell as its argv, readable by any local
-  account via `ps` for as long as that process ran. It now travels only as real SSH
-  stdin, read once into a shell variable.
+- The non-root probe path, and separately `wrapSudo` (shared by `DeploySensor`,
+  `StopSensor` and the response-action runner), fed the account's sudo password to
+  `sudo -S` embedded in the command text sshd hands the remote shell as its argv,
+  readable by any local account via `ps` for as long as that process ran. Both now
+  travel only as real SSH stdin, read once into a shell variable.
+- `POST /hosts/{id}/events`'s `Severity`/`Score` were allowlisted but unvalidated:
+  the legitimate sensor only ever sends one of five known severity labels and the
+  matching 0-100 score it derives from that label, so a leaked token sending an
+  arbitrary severity string or out-of-range score would skew that host's triage
+  display and, while the risk model is untrained, its score-derived fallback
+  probability directly. Both are now validated against the same bounds.
 - `run()` captured a scan target's stdout/stderr into unbounded buffers, so a
   compromised or merely misbehaving host could grow control-plane memory without
   limit. Output is now capped at 64 MiB per stream; exceeding it fails the command
