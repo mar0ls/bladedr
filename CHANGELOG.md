@@ -3,7 +3,15 @@
 Notable changes. Format loosely follows [Keep a Changelog](https://keepachangelog.com);
 versions follow [SemVer](https://semver.org).
 
-## [Unreleased]
+## [0.9.4] - 2026-10-21
+
+A STRIDE-style review of the sensor/SSH/audit paths, five findings fixed with
+tests: a leaked sensor token could poison the ML risk model, run an unverified
+binary as root, or read a sudo password off a local process listing; a
+compromised scan target could exhaust server memory; an audit outage could go
+unnoticed. Also fixes a real `UpdateHost` race found investigating a host stuck
+reporting `pending`, and adds `docs/threat-model/` — the system's trust
+boundaries as runnable pytm code.
 
 ### Added
 
