@@ -118,7 +118,9 @@ func (q *Queue) runOne(ctx context.Context, workerID string) (bool, error) {
 	scanCtx, cancel := context.WithTimeout(ctx, q.ScanTimeout)
 	done := make(chan struct{})
 	go q.heartbeat(scanCtx, cancel, done, workerID, job.ID)
-	sc, scanErr := q.Runner.Scan(scanCtx, host, job.Trigger)
+	sc, scanErr := q.Runner.scan(scanCtx, host, job.Trigger, func(ctx context.Context) error {
+		return q.Store.RenewScanJobLease(ctx, job.ID, workerID, time.Now().UTC().Add(q.Lease))
+	})
 	close(done)
 	cancel()
 	if scanErr == nil && sc.Status == store.ScanFailed {

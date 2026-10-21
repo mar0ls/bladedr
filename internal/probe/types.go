@@ -165,11 +165,35 @@ type Process struct {
 	EnvironEmpty bool   `json:"environ_empty"` // /proc/PID/environ wiped (BPFDoor anti-forensics)
 	PacketSocket bool   `json:"packet_socket"` // holds an AF_PACKET (raw) socket — a sniffer
 	// Libraries the process has loaded that a rule can act on. Sampled, not exhaustive.
-	MappedLibsWritable []string  `json:"mapped_libs_writable"` // executable mappings under /tmp, /var/tmp, /dev/shm
-	MappedLibsDeleted  []string  `json:"mapped_libs_deleted"`  // executable mappings of deleted files outside system dirs
-	PreloadEnv         string    `json:"preload_env"`          // LD_PRELOAD/LD_AUDIT naming a non-system library
-	StartTime          time.Time `json:"start_time,omitempty"`
-	Listening          []Socket  `json:"listening,omitempty"`
+	MappedLibsWritable []string                  `json:"mapped_libs_writable"` // executable mappings under /tmp, /var/tmp, /dev/shm
+	MappedLibsDeleted  []string                  `json:"mapped_libs_deleted"`  // executable mappings of deleted files outside system dirs
+	PreloadEnv         string                    `json:"preload_env"`          // LD_PRELOAD/LD_AUDIT naming a non-system library
+	StartTime          time.Time                 `json:"start_time,omitempty"`
+	Listening          []Socket                  `json:"listening,omitempty"`
+	ExecutionEvidence  *ProcessExecutionEvidence `json:"execution_evidence"`
+}
+
+// ProcessExecutionEvidence is sampled for temporary-path or deleted file-backed executables.
+// Stable means identity checks agreed during collection, not that the process
+// is trusted. Errors and missing fields must not be interpreted as benign.
+type ProcessExecutionEvidence struct {
+	CollectedAt time.Time             `json:"collected_at"`
+	StartTicks  string                `json:"start_ticks"`
+	PPID        int                   `json:"ppid"`
+	SessionID   int                   `json:"session_id"`
+	ParentExe   string                `json:"parent_exe"`
+	Cgroup      string                `json:"cgroup"`
+	SHA256      string                `json:"sha256"`
+	Paths       []ProcessPathEvidence `json:"paths"`
+	Stable      bool                  `json:"stable"`
+	Errors      []string              `json:"errors"`
+}
+
+type ProcessPathEvidence struct {
+	Path string `json:"path"`
+	UID  uint32 `json:"uid"`
+	GID  uint32 `json:"gid"`
+	Mode string `json:"mode"`
 }
 
 type Socket struct {

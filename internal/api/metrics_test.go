@@ -80,6 +80,44 @@ type pingFailStore struct{ *store.Memory }
 
 func (pingFailStore) Ping(context.Context) error { return errors.New("db down") }
 
+// auditFailStore is a store whose AppendAudit always fails, for the
+// audit-append-failure regression test: a disk-full or unreachable audit backend
+// must not vanish silently.
+type auditFailStore struct{ *store.Memory }
+
+func (auditFailStore) AppendAudit(context.Context, *store.AuditEvent) error {
+	return errors.New("audit backend unavailable")
+}
+
+// TestAuditFailureIsCountedNotSwallowed is the regression test for the
+// repudiation finding: AppendAudit's error used to be discarded outright
+// (`_ = a.Store.AppendAudit(...)`), so an audit backend that was down left
+// zero trace that anything had gone unrecorded. A failed write must now surface
+// through the metrics counter, so it can be scraped and alerted on.
+func TestAuditFailureIsCountedNotSwallowed(t *testing.T) {
+	a := &API{Store: auditFailStore{store.NewMemory()}, metrics: newMetrics()}
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	a.auditAs(r, "someone", "test.action", "target", "ok", "")
+
+	var sb strings.Builder
+	a.metrics.write(&sb)
+	if !strings.Contains(sb.String(), "bladedr_audit_append_failures_total 1") {
+		t.Fatalf("audit failure was not counted:\n%s", sb.String())
+	}
+}
+
+func TestAuditSuccessDoesNotCountAsFailure(t *testing.T) {
+	a := &API{Store: store.NewMemory(), metrics: newMetrics()}
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	a.auditAs(r, "someone", "test.action", "target", "ok", "")
+
+	var sb strings.Builder
+	a.metrics.write(&sb)
+	if !strings.Contains(sb.String(), "bladedr_audit_append_failures_total 0") {
+		t.Fatalf("a successful append must not be counted as a failure:\n%s", sb.String())
+	}
+}
+
 func TestReadyzUnavailableWhenStoreDown(t *testing.T) {
 	a := &API{Store: pingFailStore{store.NewMemory()}}
 	w := httptest.NewRecorder()

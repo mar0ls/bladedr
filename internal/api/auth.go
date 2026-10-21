@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -62,11 +63,20 @@ func (a *API) audit(r *http.Request, action, target, result, detail string) {
 }
 
 // auditAs records a security event with an explicit actor (e.g. a failed login,
-// where there is no authenticated user yet).
+// where there is no authenticated user yet). A failure here must never be
+// silent: the audit log is the record that an action happened at all, and a
+// store that is quietly dropping entries (disk full, DB unreachable) leaves no
+// other trace of it. The action itself still completes — refusing requests
+// because the audit store is down would turn an audit outage into a full
+// outage — but the failure is logged and counted so it surfaces to an operator.
 func (a *API) auditAs(r *http.Request, actor, action, target, result, detail string) {
-	_ = a.Store.AppendAudit(r.Context(), &store.AuditEvent{
+	err := a.Store.AppendAudit(r.Context(), &store.AuditEvent{
 		Actor: actor, ActorIP: a.clientIP(r), Action: action, Target: target, Result: result, Detail: detail,
 	})
+	if err != nil {
+		a.metrics.auditFailed()
+		slog.Error("audit append failed", "action", action, "target", target, "actor", actor, "error", err)
+	}
 }
 
 const sessionCookie = "bladedr_session"

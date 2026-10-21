@@ -1,10 +1,13 @@
 package api
 
 import (
+	"context"
 	"net"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"bladedr/internal/store"
 )
 
 func TestClientIPRequiresTrustedProxy(t *testing.T) {
@@ -32,5 +35,59 @@ func TestIngestBatchLimits(t *testing.T) {
 	var dst map[string]string
 	if decode(rec, r, &dst) || rec.Code != 413 {
 		t.Fatalf("oversized JSON: ok=%v status=%d", rec.Code < 400, rec.Code)
+	}
+}
+
+// TestIngestEventsIgnoresServerControlledFields is the regression test for the
+// sensor-verdict-injection finding: a per-host sensor token is a narrower trust
+// boundary than an operator session, so a batch that tries to set verdict, id,
+// status or count must have every one of those fields ignored, even though the
+// request is otherwise well-formed and accepted.
+func TestIngestEventsIgnoresServerControlledFields(t *testing.T) {
+	a, tokens := newTestAPI(t)
+	ctx := context.Background()
+	h := &store.Host{Hostname: "sensor-host", PrimaryIP: "10.0.0.11"}
+	if err := a.Store.CreateHost(ctx, h); err != nil {
+		t.Fatal(err)
+	}
+	payload := []map[string]any{{
+		"rule_id":    "exec-tmp",
+		"severity":   "high",
+		"dedup_key":  "e1",
+		"id":         "11111111-1111-1111-1111-111111111111",
+		"host_id":    "some-other-host",
+		"source":     "operator",
+		"status":     "resolved",
+		"verdict":    "true_positive",
+		"first_seen": "2000-01-01T00:00:00Z",
+		"last_seen":  "2000-01-01T00:00:00Z",
+		"count":      999,
+	}}
+	w := do(a, "POST", "/api/v1/hosts/"+h.ID+"/events", tokens["operator"], payload)
+	if w.Code != 200 {
+		t.Fatalf("ingest events = %d (%s)", w.Code, w.Body)
+	}
+	obs, err := a.Store.ListObservations(ctx, store.ObservationFilter{HostID: h.ID})
+	if err != nil || len(obs) != 1 {
+		t.Fatalf("ListObservations: %v, %v", obs, err)
+	}
+	o := obs[0]
+	if o.ID == "11111111-1111-1111-1111-111111111111" {
+		t.Error("sensor-supplied id was not replaced with a server-assigned one")
+	}
+	if o.HostID != h.ID {
+		t.Errorf("host_id = %q, want %q (sensor must not redirect to another host)", o.HostID, h.ID)
+	}
+	if o.Source != store.SourceEBPFSensor {
+		t.Errorf("source = %q, want %q", o.Source, store.SourceEBPFSensor)
+	}
+	if o.Status != store.ObsOpen {
+		t.Errorf("status = %q, want open (sensor must not self-resolve a finding)", o.Status)
+	}
+	if o.Verdict == "true_positive" {
+		t.Error("sensor-supplied verdict was not ignored: this would poison ML training data and the fleet trust gate")
+	}
+	if o.Count > 1 {
+		t.Errorf("count = %d, want store-managed count, not sensor-supplied 999", o.Count)
 	}
 }

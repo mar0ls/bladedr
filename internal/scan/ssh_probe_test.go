@@ -3,12 +3,14 @@ package scan
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 // stubSudo answers `-l` from STUB_SUDO_ALLOW, checks a -S password against
@@ -42,6 +44,9 @@ func newProbeFixture(t *testing.T) probeFixture {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX shell")
 	}
+	if _, err := exec.LookPath("flock"); err != nil {
+		t.Skip("Linux flock required; run shell integration tests on Linux")
+	}
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "bin")
 	if err := os.Mkdir(bin, 0o755); err != nil {
@@ -72,8 +77,16 @@ func newProbeFixture(t *testing.T) probeFixture {
 
 func (f probeFixture) run(t *testing.T, cmd string, env ...string) (string, error) {
 	t.Helper()
+	return f.runWithStdin(t, cmd, nil, env...)
+}
+
+func (f probeFixture) runWithStdin(t *testing.T, cmd string, stdin io.Reader, env ...string) (string, error) {
+	t.Helper()
+	cmd = strings.ReplaceAll(cmd, "/run/bladedr-probe", filepath.Join(f.dir, "root-lock"))
+	cmd = strings.ReplaceAll(cmd, probeCacheDir+"/scan-lock", filepath.Join(f.dir, "user-lock"))
 	sh := exec.Command("/bin/sh", "-c", cmd)
 	sh.Env = append(append([]string{}, f.env...), env...)
+	sh.Stdin = stdin
 	out, err := sh.Output()
 	return strings.TrimSpace(string(out)), err
 }
@@ -83,9 +96,95 @@ func (f probeFixture) usedSudo() bool {
 	return err == nil
 }
 
+func TestRemoteProbeLockSerializesAttempts(t *testing.T) {
+	if _, err := exec.LookPath("flock"); err != nil {
+		t.Skip("requires Linux flock")
+	}
+	dir := t.TempDir()
+	lock, gate, started, second := dir+"/lock", dir+"/gate", dir+"/started", dir+"/second"
+	firstCmd := exec.Command("sh", "-c", lockedProbeScript(lock, "touch "+shellArg(started)+"; while [ ! -e "+shellArg(gate)+" ]; do sleep 0.02; done"))
+	if err := firstCmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer firstCmd.Process.Kill()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if _, err := os.Stat(started); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("first probe not started")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	secondCmd := exec.Command("sh", "-c", lockedProbeScript(lock, "touch "+shellArg(second)))
+	if err := secondCmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer secondCmd.Process.Kill()
+	time.Sleep(100 * time.Millisecond)
+	if _, err := os.Stat(second); !os.IsNotExist(err) {
+		t.Fatal("second probe started while first holds lock")
+	}
+	if err := os.WriteFile(gate, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := firstCmd.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	if err := secondCmd.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(second); err != nil {
+		t.Fatal("second probe did not resume", err)
+	}
+	if _, err := os.Stat(lock + "/scan.lock"); err != nil {
+		t.Fatal("lock inode removed", err)
+	}
+}
+
+func TestRemoteProbeLockRejectsUnsafePaths(t *testing.T) {
+	if _, err := exec.LookPath("flock"); err != nil {
+		t.Skip("requires Linux flock")
+	}
+	for _, kind := range []string{"directory symlink", "file symlink", "writable directory"} {
+		t.Run(kind, func(t *testing.T) {
+			dir := t.TempDir()
+			lock := dir + "/lock"
+			marker := dir + "/ran"
+			if kind == "directory symlink" {
+				if err := os.Symlink(dir, lock); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if err := os.Mkdir(lock, 0700); err != nil {
+					t.Fatal(err)
+				}
+				if kind == "file symlink" {
+					if err := os.Symlink(dir+"/target", lock+"/scan.lock"); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					if err := os.Chmod(lock, 0777); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			cmd := exec.Command("sh", "-c", lockedProbeScript(lock, "touch "+shellArg(marker)))
+			if err := cmd.Run(); err == nil {
+				t.Fatal("unsafe lock accepted")
+			}
+			if _, err := os.Stat(marker); !os.IsNotExist(err) {
+				t.Fatal("probe executed")
+			}
+		})
+	}
+}
+
 func TestProbeCommandRootRunsDirectly(t *testing.T) {
 	f := newProbeFixture(t)
-	out, err := f.run(t, probeCommand("root", "", f.probe, f.probeSum, f.bundle, f.bundleSum, false), "STUB_SUDO_ALLOW=1")
+	cmd, stdin := probeCommand("root", "", f.probe, f.probeSum, f.bundle, f.bundleSum, false)
+	out, err := f.runWithStdin(t, cmd, stdin, "STUB_SUDO_ALLOW=1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,7 +200,8 @@ func TestProbeCommandEscalatesFromRootOwnedCopy(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newProbeFixture(t)
-			out, err := f.run(t, probeCommand("dev", tc.pw, f.probe, f.probeSum, f.bundle, f.bundleSum, true), "STUB_SUDO_ALLOW=1", tc.env)
+			cmd, stdin := probeCommand("dev", tc.pw, f.probe, f.probeSum, f.bundle, f.bundleSum, true)
+			out, err := f.runWithStdin(t, cmd, stdin, "STUB_SUDO_ALLOW=1", tc.env)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -129,7 +229,8 @@ func TestProbeCommandFallsBackWithoutSudoRights(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newProbeFixture(t)
-			out, err := f.run(t, probeCommand("dev", "pw", f.probe, f.probeSum, f.bundle, f.bundleSum, false), env...)
+			cmd, stdin := probeCommand("dev", "pw", f.probe, f.probeSum, f.bundle, f.bundleSum, false)
+			out, err := f.runWithStdin(t, cmd, stdin, env...)
 			if err != nil {
 				t.Fatalf("an account without sudo must still get the unprivileged scan: %v", err)
 			}
@@ -140,9 +241,33 @@ func TestProbeCommandFallsBackWithoutSudoRights(t *testing.T) {
 	}
 }
 
+// TestProbeCommandDoesNotLeakPasswordInCommandText is the regression test for the
+// sudo-password-in-argv finding: sshd execs the remote shell with the command text
+// as its argv, which any local account can read off that process in `ps` for as
+// long as it runs. The password must only ever travel as real stdin bytes (which
+// run() pipes through a dedicated channel, invisible to `ps`), never as a quoted
+// literal inside the command string itself.
+func TestProbeCommandDoesNotLeakPasswordInCommandText(t *testing.T) {
+	const pw = "s3cr3t-sudo-password"
+	cmd, stdin := probeCommand("dev", pw, "/probe", "digest", "/rules.json", "digest", false)
+	if strings.Contains(cmd, pw) {
+		t.Fatalf("password leaked into command text (visible to any local account via ps): %q", cmd)
+	}
+	if stdin == nil {
+		t.Fatal("a password-escalation command must carry the password as stdin")
+	}
+	got, err := io.ReadAll(stdin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != pw+"\n" {
+		t.Fatalf("stdin = %q, want the password newline-terminated", got)
+	}
+}
+
 func TestProbeCommandRefusesTamperedProbe(t *testing.T) {
 	f := newProbeFixture(t)
-	cmd := probeCommand("dev", "", f.probe, f.probeSum, f.bundle, f.bundleSum, false)
+	cmd, _ := probeCommand("dev", "", f.probe, f.probeSum, f.bundle, f.bundleSum, false)
 	// The swap the copy-and-verify step exists for: the scan account rewrites the
 	// cached binary after the server's digest check.
 	if err := os.WriteFile(f.probe, []byte("#!/bin/sh\necho owned\n"), 0o700); err != nil {

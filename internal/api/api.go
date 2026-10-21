@@ -406,9 +406,17 @@ func (a *API) createCredential(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch body.AuthType {
-	case store.AuthSSHKey, store.AuthPassword, store.AuthSSHAgent:
+	case store.AuthSSHKey, store.AuthPassword:
 	case "":
 		body.AuthType = store.AuthSSHKey
+	case store.AuthSSHAgent:
+		// Accepted by the schema (it is a real auth_type, and may be wired up later) but
+		// not by scan.AuthFor: a credential created with it would seal fine and then fail
+		// every scan with "unsupported auth type", discovered only at scan time. Rejecting
+		// it here, at creation, is the same fail-fast the UI already gives by never
+		// offering it as a choice (see uiAddHost/uiEditHost).
+		writeError(w, http.StatusBadRequest, "ssh_agent auth is not implemented for scans yet; use ssh_key or password")
+		return
 	default:
 		writeError(w, http.StatusBadRequest, "invalid auth_type")
 		return
@@ -905,18 +913,40 @@ func (a *API) listAudit(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, evs)
 }
 
+// sensorEvent is the only shape a bladedr-sensor batch is decoded into. A sensor
+// token is a narrower trust boundary than an operator session (see docs/threat
+// model: a single compromised/leaked host token should not be able to do more than
+// report detections for that host), so this allowlists exactly the detection
+// metadata a Tetragon policy produces. Everything that governs workflow or ML
+// training — Verdict, Status, ID, DedupKey's collision bookkeeping, Count,
+// First/LastSeen — stays server-assigned, the same way UpsertObservation and
+// ingestEvents already force HostID and Source. Decoding into store.Observation
+// directly, by contrast, would let a sensor hand UpsertObservation a pre-set
+// Verdict (poisoning the risk-model training set and the fleet trust-gate count)
+// or an ID (colliding with/overwriting an unrelated observation).
+type sensorEvent struct {
+	RuleID   string         `json:"rule_id"`
+	Category string         `json:"category"`
+	Title    string         `json:"title"`
+	Severity string         `json:"severity"`
+	Score    int            `json:"score"`
+	Mitre    []string       `json:"mitre,omitempty"`
+	Evidence map[string]any `json:"evidence,omitempty"`
+	DedupKey string         `json:"dedup_key"`
+}
+
 // ingestEvents accepts a batch of eBPF-sensor observations for a host (the
-// bladedr-sensor Tetragon wrapper posts these). The server forces HostID, Source
-// and an open status — it trusts the sensor for the detection metadata (which it
-// derives from the loaded policies) the same way it trusts the probe for findings.
-// POST /api/v1/hosts/{id}/events.
+// bladedr-sensor Tetragon wrapper posts these). The server trusts the sensor only
+// for the detection metadata in sensorEvent (which it derives from the loaded
+// policies), the same way it trusts the probe for findings; HostID, Source,
+// Status and Verdict are always server-assigned. POST /api/v1/hosts/{id}/events.
 func (a *API) ingestEvents(w http.ResponseWriter, r *http.Request) {
 	host, err := a.Store.GetHost(r.Context(), r.PathValue("id"))
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
-	var evs []store.Observation
+	var evs []sensorEvent
 	if !decodeLimited(w, r, &evs, maxIngestBodyBytes) {
 		return
 	}
@@ -926,12 +956,22 @@ func (a *API) ingestEvents(w http.ResponseWriter, r *http.Request) {
 	}
 	n := 0
 	for i := range evs {
-		o := evs[i]
-		o.HostID = host.ID
-		o.Source = store.SourceEBPFSensor
-		o.Status = store.ObsOpen
-		if o.RuleID == "" || o.DedupKey == "" {
+		e := evs[i]
+		if e.RuleID == "" || e.DedupKey == "" {
 			continue
+		}
+		o := store.Observation{
+			HostID:   host.ID,
+			Source:   store.SourceEBPFSensor,
+			Status:   store.ObsOpen,
+			RuleID:   e.RuleID,
+			Category: e.Category,
+			Title:    e.Title,
+			Severity: e.Severity,
+			Score:    e.Score,
+			Mitre:    e.Mitre,
+			Evidence: e.Evidence,
+			DedupKey: e.DedupKey,
 		}
 		if _, err := a.Store.UpsertObservation(r.Context(), &o); err == nil {
 			n++

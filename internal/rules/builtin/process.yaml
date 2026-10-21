@@ -10,6 +10,9 @@ evidence:
   pid: item.pid
   exe: item.exe
   comm: item.comm
+  ppid: item.ppid
+  uid: item.uid
+  execution: 'has(item.execution_evidence) ? item.execution_evidence : null'
 dedup: ["item.pid", "item.exe"]
 ---
 id: memfd-fileless-exec
@@ -37,7 +40,10 @@ when: 'item.exe.startsWith("/tmp/") || item.exe.startsWith("/dev/shm/") || item.
 evidence:
   pid: item.pid
   exe: item.exe
-dedup: ["item.exe"]
+  ppid: item.ppid
+  uid: item.uid
+  execution: 'has(item.execution_evidence) ? item.execution_evidence : null'
+dedup: ["item.pid", "item.exe"]
 ---
 id: masquerade-kernel-thread
 title: "Userland process masquerading as a kernel thread (kworker)"
@@ -119,7 +125,10 @@ evidence:
   comm: item.comm
   exe: item.exe
   libs: item.mapped_libs_writable
-dedup: ["item.exe"]
+  ppid: item.ppid
+  uid: item.uid
+  execution: 'has(item.execution_evidence) ? item.execution_evidence : null'
+dedup: ["item.pid", "item.exe"]
 ---
 id: process-library-deleted
 title: "Process runs a shared library that was deleted from disk after loading"
@@ -139,7 +148,10 @@ evidence:
   comm: item.comm
   exe: item.exe
   libs: item.mapped_libs_deleted
-dedup: ["item.exe"]
+  ppid: item.ppid
+  uid: item.uid
+  execution: 'has(item.execution_evidence) ? item.execution_evidence : null'
+dedup: ["item.pid", "item.exe"]
 ---
 id: process-ld-preload-env
 title: "Process started with LD_PRELOAD/LD_AUDIT pointing at a non-system library"
@@ -157,4 +169,7 @@ evidence:
   comm: item.comm
   exe: item.exe
   env: item.preload_env
-dedup: ["item.exe"]
+  ppid: item.ppid
+  uid: item.uid
+  execution: 'has(item.execution_evidence) ? item.execution_evidence : null'
+dedup: ["item.pid", "item.exe"]

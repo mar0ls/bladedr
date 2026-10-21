@@ -15,10 +15,11 @@ import (
 // metrics collects HTTP request counts and aggregate duration in Prometheus text
 // format.
 type metrics struct {
-	mu       sync.Mutex
-	requests map[string]int64 // "method\x00code" -> count
-	durSum   float64
-	durCount int64
+	mu            sync.Mutex
+	requests      map[string]int64 // "method\x00code" -> count
+	durSum        float64
+	durCount      int64
+	auditFailures int64
 }
 
 func newMetrics() *metrics { return &metrics{requests: map[string]int64{}} }
@@ -29,6 +30,16 @@ func (m *metrics) observe(method string, code int, d time.Duration) {
 	m.requests[method+"\x00"+strconv.Itoa(code)]++
 	m.durSum += d.Seconds()
 	m.durCount++
+}
+
+// auditFailed records that a security event could not be written to the audit
+// log. It must stay visible and alertable: an audit store that is silently
+// failing (disk full, DB down, permissions) means every action taken while it is
+// down leaves no trail, which is as bad as not auditing at all.
+func (m *metrics) auditFailed() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.auditFailures++
 }
 
 func (m *metrics) write(w io.Writer) {
@@ -44,6 +55,9 @@ func (m *metrics) write(w io.Writer) {
 	fmt.Fprintln(w, "# TYPE bladedr_http_request_duration_seconds summary")
 	fmt.Fprintf(w, "bladedr_http_request_duration_seconds_sum %g\n", m.durSum)
 	fmt.Fprintf(w, "bladedr_http_request_duration_seconds_count %d\n", m.durCount)
+	fmt.Fprintln(w, "# HELP bladedr_audit_append_failures_total Security events that could not be written to the audit log.")
+	fmt.Fprintln(w, "# TYPE bladedr_audit_append_failures_total counter")
+	fmt.Fprintf(w, "bladedr_audit_append_failures_total %d\n", m.auditFailures)
 }
 
 // statusRecorder captures the response status for metrics and access logging.

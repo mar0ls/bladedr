@@ -110,6 +110,10 @@ func (r *Runner) DisableSensor(ctx context.Context, host *store.Host) error {
 
 // Scan runs one agentless scan against host and stores the resulting observations.
 func (r *Runner) Scan(ctx context.Context, host *store.Host, trigger string) (*store.Scan, error) {
+	return r.scan(ctx, host, trigger, nil)
+}
+
+func (r *Runner) scan(ctx context.Context, host *store.Host, trigger string, validateOwner func(context.Context) error) (*store.Scan, error) {
 	now := time.Now().UTC()
 	sc := &store.Scan{HostID: host.ID, Trigger: trigger, Status: store.ScanRunning, StartedAt: now}
 	if err := r.Store.CreateScan(ctx, sc); err != nil {
@@ -145,6 +149,26 @@ func (r *Runner) Scan(ctx context.Context, host *store.Host, trigger string) (*s
 
 	bundle := rules.BundleFrom(activeRules)
 	result, err := transport.RunProbe(ctx, bundle, false)
+	// A transport can finish after cancellation, including after another worker
+	// reclaimed its job. Do not ingest stale findings or mark the host unreachable.
+	discard := func(cause error) (*store.Scan, error) {
+		end := time.Now().UTC()
+		sc.Status, sc.Error, sc.FinishedAt = store.ScanFailed, "discarded scan result: "+cause.Error(), &end
+		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+		defer cancel()
+		if updateErr := r.Store.UpdateScan(cleanup, sc); updateErr != nil {
+			return sc, fmt.Errorf("discard result (%v): %w", cause, updateErr)
+		}
+		return sc, cause
+	}
+	if ctx.Err() != nil {
+		return discard(ctx.Err())
+	}
+	if validateOwner != nil {
+		if ownerErr := validateOwner(ctx); ownerErr != nil {
+			return discard(ownerErr)
+		}
+	}
 	if err != nil {
 		return finish(store.ScanFailed, "probe: "+err.Error())
 	}
