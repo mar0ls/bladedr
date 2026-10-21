@@ -82,6 +82,7 @@ func runStoreContract(t *testing.T, open newStore) {
 		run  func(*testing.T, context.Context, Store)
 	}{
 		{"HostRoundTrip", contractHostRoundTrip},
+		{"HostNarrowUpdatesDoNotRace", contractHostNarrowUpdatesDoNotRace},
 		{"CredentialSudoSecret", contractCredentialSudoSecret},
 		{"HostInventoryReplaces", contractHostInventory},
 		{"ClosedFindingReopensWhenItReturns", contractReopenOnReturn},
@@ -227,6 +228,71 @@ func contractHostRoundTrip(t *testing.T, ctx context.Context, s Store) {
 		t.Fatal("get after delete returned no error")
 	} else if _, ok := err.(ErrNotFound); !ok {
 		t.Errorf("get after delete = %T (%v), want ErrNotFound", err, err)
+	}
+}
+
+// This is the regression test for the bug a live host (vps-38766e17) hit in
+// practice: a scan reported success (SetHostOnline) around the same time the SSH
+// dial's TOFU callback pinned a freshly-learned host key (SetHostSSHHostKey). Both
+// narrow setters touch different columns of the same row. Before they existed,
+// both call sites went through UpdateHost(ctx, host) with a possibly-stale, fully
+// populated Host snapshot, so whichever call landed second overwrote every column
+// from its own snapshot -- including the one the other call had just changed,
+// silently reverting it. A backend where these interleave correctly must end up
+// with both changes; one where they still race via a full-row overwrite loses one.
+func contractHostNarrowUpdatesDoNotRace(t *testing.T, ctx context.Context, s Store) {
+	h := mustHost(t, ctx, s)
+	lastSeen := time.Now().UTC().Truncate(time.Second)
+
+	if err := s.SetHostSSHHostKey(ctx, h.ID, "ssh-ed25519 AAAANARROW"); err != nil {
+		t.Fatalf("SetHostSSHHostKey: %v", err)
+	}
+	if err := s.SetHostOnline(ctx, h.ID, lastSeen, "Ubuntu 26.04 LTS", "7.0.0-38-generic", "amd64", "narrow-host"); err != nil {
+		t.Fatalf("SetHostOnline: %v", err)
+	}
+
+	got, err := s.GetHost(ctx, h.ID)
+	if err != nil {
+		t.Fatalf("get host: %v", err)
+	}
+	if got.SSHHostKey != "ssh-ed25519 AAAANARROW" {
+		t.Errorf("SetHostOnline reverted a concurrently learned host key: ssh_host_key = %q", got.SSHHostKey)
+	}
+	if got.Status != StatusOnline {
+		t.Errorf("status = %q, want %q", got.Status, StatusOnline)
+	}
+	if got.LastSeen == nil || !got.LastSeen.Equal(lastSeen) {
+		t.Errorf("last_seen = %v, want %v", got.LastSeen, lastSeen)
+	}
+	if got.OSName != "Ubuntu 26.04 LTS" || got.Kernel != "7.0.0-38-generic" || got.Arch != "amd64" {
+		t.Errorf("os/kernel/arch = %q/%q/%q", got.OSName, got.Kernel, got.Arch)
+	}
+
+	// A scan that could not read OS/kernel/arch (unprivileged, or a collector
+	// error) must not blank out values a previous, more privileged scan recorded.
+	if err := s.SetHostOnline(ctx, h.ID, lastSeen, "", "", "", ""); err != nil {
+		t.Fatalf("SetHostOnline (empty fields): %v", err)
+	}
+	got, err = s.GetHost(ctx, h.ID)
+	if err != nil {
+		t.Fatalf("get host: %v", err)
+	}
+	if got.OSName != "Ubuntu 26.04 LTS" || got.Kernel != "7.0.0-38-generic" || got.Arch != "amd64" {
+		t.Errorf("empty fields blanked existing values: os/kernel/arch = %q/%q/%q", got.OSName, got.Kernel, got.Arch)
+	}
+
+	if err := s.SetHostUnreachable(ctx, h.ID); err != nil {
+		t.Fatalf("SetHostUnreachable: %v", err)
+	}
+	got, err = s.GetHost(ctx, h.ID)
+	if err != nil {
+		t.Fatalf("get host: %v", err)
+	}
+	if got.Status != StatusUnreachable {
+		t.Errorf("status = %q, want %q", got.Status, StatusUnreachable)
+	}
+	if got.SSHHostKey != "ssh-ed25519 AAAANARROW" {
+		t.Errorf("SetHostUnreachable must not touch unrelated columns: ssh_host_key = %q", got.SSHHostKey)
 	}
 }
 

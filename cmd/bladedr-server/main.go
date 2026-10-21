@@ -262,8 +262,11 @@ func transportFactory(ctx context.Context, st store.Store, crypto *secrets.Crypt
 		t.SudoPassword = sudoPasswordFor(crypto, cred, secret)
 		t.ExpectedHostKey = h.SSHHostKey
 		t.OnLearnHostKey = func(key string) { // TOFU: pin on first contact
-			h.SSHHostKey = key
-			_ = st.UpdateHost(ctx, h)
+			// Narrow setter, not UpdateHost(ctx, h): this fires mid-dial, from inside
+			// RunProbe, well before the scan's own outcome is known. A full overwrite
+			// from h here would race updateHostFromResult's write for the same scan
+			// (and any concurrent scan's), each potentially reverting the other.
+			_ = st.SetHostSSHHostKey(ctx, h.ID, key)
 		}
 		return t, nil
 	}
@@ -497,7 +500,8 @@ func sensorTransportFactory(ctx context.Context, st store.Store, crypto *secrets
 		}
 		t := scan.NewSSHTransport(h.Hostname, net.JoinHostPort(h.PrimaryIP, strconv.Itoa(h.SSHPort)), cred.Username, auth, probeBins[arch])
 		t.ExpectedHostKey = h.SSHHostKey
-		t.OnLearnHostKey = func(key string) { h.SSHHostKey = key; _ = st.UpdateHost(ctx, h) }
+		// Narrow setter: see the matching comment in transportFactory.
+		t.OnLearnHostKey = func(key string) { _ = st.SetHostSSHHostKey(ctx, h.ID, key) }
 		return t, sudoPasswordFor(crypto, cred, secret), nil
 	}
 }

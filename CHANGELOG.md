@@ -44,6 +44,12 @@ versions follow [SemVer](https://semver.org).
   leaving no trace that anything had gone unrecorded. Failures are now logged and
   counted in a new `bladedr_audit_append_failures_total` metric; the triggering
   action still completes.
+- `UpdateHost` overwrites every column, so a scan's own outcome and the SSH dial's
+  TOFU host-key pinning — both background writes racing on the same host row —
+  could silently revert each other, observed in practice as a host stuck reporting
+  `pending` after a scan that had actually just succeeded. Both now go through
+  narrow, single-column setters (`SetHostOnline`, `SetHostUnreachable`,
+  `SetHostSSHHostKey`) instead.
 
 ### Added
 

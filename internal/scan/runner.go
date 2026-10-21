@@ -128,10 +128,12 @@ func (r *Runner) scan(ctx context.Context, host *store.Host, trigger string, val
 		sc.Error = errMsg
 		_ = r.Store.UpdateScan(ctx, sc)
 		// A failed scan marks the host unreachable so it's distinguishable from a
-		// never-scanned "pending" host (e.g. devRhel with bad SSH credentials).
-		if status == store.ScanFailed && host.Status != store.StatusUnreachable {
-			host.Status = store.StatusUnreachable
-			_ = r.Store.UpdateHost(ctx, host)
+		// never-scanned "pending" host (e.g. devRhel with bad SSH credentials). Narrow
+		// setter: a full UpdateHost here, built from this call's possibly-stale host
+		// snapshot, would race a concurrent scan's or host-key-learn's own write to
+		// the same row and could silently revert it (see SetHostOnline's doc).
+		if status == store.ScanFailed {
+			_ = r.Store.SetHostUnreachable(ctx, host.ID)
 		}
 		return sc, nil
 	}
@@ -432,21 +434,13 @@ func itoa(n int) string { return strconv.Itoa(n) }
 
 func (r *Runner) updateHostFromResult(ctx context.Context, host *store.Host, res probe.ScanResult) {
 	now := time.Now().UTC()
-	host.LastSeen = &now
-	host.Status = store.StatusOnline
-	if res.Host.OS != "" {
-		host.OSName = res.Host.OS
-	}
-	if res.Host.Kernel != "" {
-		host.Kernel = res.Host.Kernel
-	}
-	if res.Host.Arch != "" {
-		host.Arch = res.Host.Arch
-	}
-	if host.Hostname == "" {
-		host.Hostname = res.Host.Hostname
-	}
-	_ = r.Store.UpdateHost(ctx, host)
+	// Narrow setter, not UpdateHost(ctx, host): host is a snapshot read at the start
+	// of this scan, and a full overwrite from it would race (and could silently
+	// revert) a concurrent scan's or host-key-learn's own write to the same row.
+	// SetHostOnline only ever touches the columns a scan outcome actually knows
+	// about, so two scans finishing close together just leave last-write-wins
+	// semantics on those columns, not a lost update of unrelated fields.
+	_ = r.Store.SetHostOnline(ctx, host.ID, now, res.Host.OS, res.Host.Kernel, res.Host.Arch, res.Host.Hostname)
 }
 
 // ----------------------------------------------------------------------------

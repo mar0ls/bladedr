@@ -184,6 +184,19 @@ lockdown, systemd timers, GTFOBins in cron/sudo, initramfs hooks, SELinux-disabl
 
 ## Known limitations
 
+**`UpdateHost` is a full-row overwrite; admin edits can still race a background
+write.** Resolved 2026-10-21 for the case that actually recurred in practice — a
+scan's own outcome (`SetHostOnline`/`SetHostUnreachable`) and the SSH dial's
+TOFU host-key pinning (`SetHostSSHHostKey`) now go through narrow, single-column
+setters instead of `UpdateHost(ctx, host)`, so two of those racing each other can no
+longer silently revert one write with the other's stale snapshot (`internal/store`:
+`contractHostNarrowUpdatesDoNotRace`, run against both backends). What's still
+open: the host-edit UI (`uiEditHost`) reads a `Host`, lets an operator fill in a
+form, and writes the whole thing back with one `UpdateHost` call. If a scan
+finishes (or a host key gets learned) while that edit is in flight, the edit's
+full-row write can still revert it — same shape of bug, much narrower window
+(needs a human mid-edit, not two automatic processes ~10s apart), not yet fixed.
+
 **A scan reports one status for every collector.** `ok`/`partial` is binary across the
 whole snapshot (collector_errors joined into one scan.error string); there is no per-
 collector success/failure breakdown, so a scan that silently lost one of the ~50

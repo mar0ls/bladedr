@@ -427,7 +427,24 @@ type Store interface {
 	CreateHost(ctx context.Context, h *Host) error
 	GetHost(ctx context.Context, id string) (*Host, error)
 	ListHosts(ctx context.Context) ([]*Host, error)
+	// UpdateHost overwrites every column from h. It is for admin-driven edits (the
+	// API's PATCH /hosts/{id}), made by one caller holding a just-read Host. It is
+	// the wrong tool for a background writer that only knows about one of a host's
+	// fields (a scan's outcome, a learned SSH host key): two such writers racing
+	// each other's UpdateHost would silently lose whichever wrote first, since
+	// each overwrites the whole row from its own possibly-stale snapshot. Use the
+	// narrow Set* methods below for that instead.
 	UpdateHost(ctx context.Context, h *Host) error
+	// SetHostOnline and SetHostUnreachable record a scan's outcome without touching
+	// any field the scan doesn't know about. osName/kernel/arch/hostname apply only
+	// when non-empty (an unprivileged scan that couldn't read them leaves the
+	// existing value alone); hostname only fills in a host created without one.
+	SetHostOnline(ctx context.Context, id string, lastSeen time.Time, osName, kernel, arch, hostname string) error
+	SetHostUnreachable(ctx context.Context, id string) error
+	// SetHostSSHHostKey pins the host key learned on first (or first post-reset)
+	// contact. Narrow for the same reason as SetHostOnline: it fires mid-scan, from
+	// the SSH dial callback, well before the scan's own outcome is known.
+	SetHostSSHHostKey(ctx context.Context, id, key string) error
 	DeleteHost(ctx context.Context, id string) error
 
 	// Credentials. CreateCredential stores already-sealed SecretEnc. Get returns
