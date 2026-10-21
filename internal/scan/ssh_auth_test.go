@@ -1,18 +1,31 @@
 package scan
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/pem"
 	"errors"
-	"os"
 	"os/exec"
 	"testing"
+
+	"golang.org/x/crypto/ssh"
 )
 
 func TestAuthForSSHKey(t *testing.T) {
-	pem, err := os.ReadFile("testdata/ed25519_key")
+	// Generated fresh per run rather than read from a checked-in fixture: a static
+	// PEM private key in testdata, even an unused throwaway, is exactly what
+	// secret-scanning CI (semgrep's generic.secrets.security.detected-private-key)
+	// exists to flag, and rightly so -- nothing distinguishes a disposable test key
+	// from a real leaked one by looking at the file alone.
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
-	methods, err := AuthFor("ssh_key", string(pem))
+	block, err := ssh.MarshalPrivateKey(priv, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	methods, err := AuthFor("ssh_key", string(pem.EncodeToMemory(block)))
 	if err != nil || len(methods) != 1 {
 		t.Fatalf("AuthFor(ssh_key) = %v, %v", methods, err)
 	}
