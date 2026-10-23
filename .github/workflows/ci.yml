@@ -84,11 +84,11 @@ jobs:
   # stopped being exercised, which would otherwise raise the score by shrinking the
   # denominator.
   #
-  # 102, not 107: five techniques need root and a real kernel (chattr +i, binfmt register,
+  # 103, not 108: five techniques need root and a real kernel (chattr +i, binfmt register,
   # /proc bind-mount, core_pattern, Yama) and cannot run in a container. Those are
   # verified against real hosts out of band — see poligon/README.md.
   #
-  # Of the 102, 30 are benign-but-flagged scenarios — legitimate configs that trip an
+  # Of the 103, 30 are benign-but-flagged scenarios — legitimate configs that trip an
   # ambiguous rule. They are the risk model's negative class, and the lab counts them
   # separately from detection coverage so they cannot inflate it.
   #
@@ -110,7 +110,7 @@ jobs:
         run: |
           GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o bin/bladedr-probe.linux-amd64 ./cmd/bladedr-probe
           GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -o bin/bladedr-probe.linux-arm64 ./cmd/bladedr-probe
-          go run ./cmd/bladedr-lab --fail-on-miss --expect-techniques 102
+          go run ./cmd/bladedr-lab --fail-on-miss --expect-techniques 103
       # The other half: a rule that fires on an untouched system is noise on every host in
       # the fleet, and technique coverage says nothing about it. Runs the same probe and
       # rules against stock Debian, Ubuntu, Rocky and Alpine and requires silence, which

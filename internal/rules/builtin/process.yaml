@@ -108,6 +108,35 @@ evidence:
   cmdline: item.cmdline
 dedup: ["item.pid", "item.cmdline"]
 ---
+id: shell-child-of-web-server
+title: "Shell process spawned directly by a web server — possible command injection or web shell"
+category: execution
+severity: medium
+score: 50
+mitre: ["T1059.004"]
+# A reverse-proxy/app-server stack (nginx, php-fpm, apache, caddy, lighttpd) spawning a
+# shell as its direct child is the shape of a web shell or command-injection pivot:
+# php-fpm's own shell_exec()/system() calls create exactly this parent/child pair, which
+# is also how a legitimate PHP app that shells out to a CLI tool looks. That overlap is
+# why this is medium, not critical: it is a real signal worth an analyst's look, not an
+# automatic verdict, and the ambiguity is deliberately left for the risk model to learn
+# from rather than resolved by guessing at intent here.
+foreach: processes
+when: >
+  item.exe != "" &&
+  (item.exe.endsWith("/sh") || item.exe.endsWith("/bash") || item.exe.endsWith("/dash") ||
+   item.exe.endsWith("/ash") || item.exe.endsWith("/zsh")) &&
+  snapshot.processes.exists(p, p.pid == item.ppid &&
+    (p.exe.endsWith("/nginx") || p.exe.endsWith("/httpd") || p.exe.endsWith("/apache2") ||
+     p.exe.endsWith("/caddy") || p.exe.endsWith("/lighttpd") || p.exe.contains("php-fpm")))
+evidence:
+  pid: item.pid
+  exe: item.exe
+  cmdline: item.cmdline
+  ppid: item.ppid
+  parent_exe: snapshot.processes.filter(p, p.pid == item.ppid)[0].exe
+dedup: ["item.pid", "item.exe"]
+---
 id: process-library-from-writable-path
 title: "Process has a shared library loaded from a world-writable directory"
 category: process

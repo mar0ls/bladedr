@@ -190,6 +190,9 @@ techniques:
   - id: revshell-proc
     tactic: execution
     expect: process-reverse-shell-cmdline
+  - id: shell-child-of-web-server
+    tactic: execution
+    expect: shell-child-of-web-server
   - id: ssh-tunnel-proc
     tactic: lateral
     expect: ssh-tunnel-process

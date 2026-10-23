@@ -20,7 +20,9 @@ func fixtureSnapshot() *probe.Snapshot {
 			{PID: 6200, Comm: "nginx", Exe: "/usr/sbin/nginx", MappedLibsWritable: []string{"/tmp/.x/libhook.so"}},
 			{PID: 6201, Comm: "postgres", Exe: "/usr/lib/postgresql/16/bin/postgres", MappedLibsDeleted: []string{"/run/.x/libgone.so"}},
 			{PID: 6202, Comm: "cron", Exe: "/usr/sbin/cron", PreloadEnv: "LD_PRELOAD=/tmp/.x/evil.so"},
-			{PID: 6203, Comm: "apache2", Exe: "/usr/sbin/apache2", PreloadEnv: ""}, // benign: no library finding
+			{PID: 6203, Comm: "apache2", Exe: "/usr/sbin/apache2", PreloadEnv: ""},   // benign: no library finding
+			{PID: 6300, PPID: 6200, Comm: "sh", Exe: "/bin/sh", Cmdline: "sh -c id"}, // webshell pivot: direct child of nginx (6200)
+			{PID: 6301, PPID: 1, Comm: "bash", Exe: "/bin/bash", Cmdline: "bash"},    // benign: shell with no web-server parent
 		},
 		ListeningSockets: []probe.Socket{
 			{Proto: "tcp", LAddr: "0.0.0.0", LPort: 4444, PID: 4711, Comm: "payload"},
@@ -423,5 +425,8 @@ func TestBuiltinRulesFireOnMaliciousSnapshot(t *testing.T) {
 	}
 	if got["kernel-out-of-tree-module-load"] != 1 {
 		t.Errorf("oot-module rule should fire once, got %d", got["kernel-out-of-tree-module-load"])
+	}
+	if got["shell-child-of-web-server"] != 1 {
+		t.Errorf("shell-child-of-web-server should fire once (sh, direct child of nginx 6200, not the unrelated bash under init), got %d", got["shell-child-of-web-server"])
 	}
 }

@@ -14,6 +14,10 @@
 //	              and exit — generated at plant time so no key is ever committed
 //	--map FILE    map FILE read+exec into this process, as a loaded shared library
 //	              (process-library-from-writable-path / process-library-deleted)
+//	--spawn-shell start a real /bin/sh child (left running, this process's direct
+//	              child per the OS, not just a spoofed argv) and keep sleeping
+//	              (shell-child-of-web-server: this binary is copied to a path
+//	              ending in a web-server name, e.g. .../nginx, as the "parent")
 //	(anything else / none) just sleep — for deleted/world-writable/masquerade/
 //	                        empty-environ/reverse-shell/ssh-tunnel via spoofed exec
 package main
@@ -24,6 +28,7 @@ import (
 	"encoding/pem"
 	"net"
 	"os"
+	"os/exec"
 	"strconv"
 	"syscall"
 	"time"
@@ -36,7 +41,7 @@ import (
 const holdFor = time.Hour // hold the resource well past a scan; the orchestrator kills us
 
 func main() {
-	listen, connect, packet, memfd := 0, 0, false, false
+	listen, connect, packet, memfd, spawnShell := 0, 0, false, false, false
 	mapFile := ""
 	args := os.Args[1:]
 	for i := 0; i < len(args); i++ {
@@ -54,6 +59,8 @@ func main() {
 			packet = true
 		case "--memfd":
 			memfd = true
+		case "--spawn-shell":
+			spawnShell = true
 		case "--map":
 			if i+1 < len(args) {
 				i++
@@ -83,12 +90,28 @@ func main() {
 	if mapFile != "" {
 		mapExecutable(mapFile)
 	}
+	if spawnShell {
+		spawnChildShell()
+	}
 	if packet {
 		if fd, err := unix.Socket(unix.AF_PACKET, unix.SOCK_RAW, int(htons(unix.ETH_P_ALL))); err == nil {
 			defer unix.Close(fd)
 		}
 	}
 	time.Sleep(holdFor)
+}
+
+// spawnChildShell starts a real /bin/sh that outlives this call, as this process's
+// direct OS child (shell-child-of-web-server: this binary is copied to a path
+// ending in a web-server name, so its own /proc/PID/exe is what the rule's parent
+// lookup matches). Best-effort: a failure here just leaves nothing to detect,
+// same as any other technique whose prerequisite (a shell, here) is missing.
+func spawnChildShell() {
+	cmd := exec.Command("/bin/sh", "-c", "sleep "+strconv.Itoa(int(holdFor.Seconds())))
+	// Pdeathsig so cleanup (which only kills this process, not a tree) doesn't
+	// orphan the child onto PID 1 for the rest of holdFor.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}
+	_ = cmd.Start()
 }
 
 // mapExecutable maps the first page of a file read+exec, which is what the dynamic
