@@ -107,7 +107,9 @@ func main() {
 // lookup matches). Best-effort: a failure here just leaves nothing to detect,
 // same as any other technique whose prerequisite (a shell, here) is missing.
 func spawnChildShell() {
-	cmd := exec.Command("/bin/sh", "-c", "sleep "+strconv.Itoa(int(holdFor.Seconds())))
+	// holdFor is the package const above, not external input -- there is nothing
+	// here for an attacker to reach, let alone inject through.
+	cmd := exec.Command("/bin/sh", "-c", "sleep "+strconv.Itoa(int(holdFor.Seconds()))) // nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command
 	// Pdeathsig so cleanup (which only kills this process, not a tree) doesn't
 	// orphan the child onto PID 1 for the rest of holdFor.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}
