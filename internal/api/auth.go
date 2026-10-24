@@ -300,6 +300,7 @@ func (a *API) setupMFA(w http.ResponseWriter, r *http.Request) {
 	}
 	var body struct {
 		Password string `json:"password"`
+		Code     string `json:"code"`
 	}
 	if !decode(w, r, &body) {
 		return
@@ -307,6 +308,17 @@ func (a *API) setupMFA(w http.ResponseWriter, r *http.Request) {
 	if !auth.CheckPassword(u.PasswordHash, body.Password) {
 		writeError(w, http.StatusUnauthorized, "password confirmation failed")
 		return
+	}
+	// Re-enrolling over an already-enabled factor must prove the current one, the
+	// same bar disableMFA holds — otherwise this endpoint is a password-only way to
+	// silently replace (or, until confirm, disable) MFA on an account whose
+	// password alone has leaked. A first-time setup has no existing code to check.
+	if u.MFAEnabled {
+		secret, err := a.Crypto.Open(u.MFASecretEnc)
+		if err != nil || !auth.VerifyTOTP(string(secret), body.Code, time.Now()) {
+			writeError(w, http.StatusUnauthorized, "valid current MFA code required to re-enroll")
+			return
+		}
 	}
 	secret, err := auth.NewTOTPSecret()
 	if err != nil {
