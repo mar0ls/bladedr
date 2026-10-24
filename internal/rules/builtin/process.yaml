@@ -134,7 +134,12 @@ evidence:
   exe: item.exe
   cmdline: item.cmdline
   ppid: item.ppid
-  parent_exe: snapshot.processes.filter(p, p.pid == item.ppid)[0].exe
+  # "parent", not "parent_exe": internal/risk/model.go's parentClass already buckets
+  # this exact key (its own doc comment gives "shell spawned by a web server" as the
+  # example) from the eBPF sensor's own evidence (internal/sensor/event.go); matching
+  # the name is what lets this rule's findings feed the same learned feature instead
+  # of a parallel one the model never sees.
+  parent: snapshot.processes.filter(p, p.pid == item.ppid)[0].exe
 dedup: ["item.pid", "item.exe"]
 ---
 id: process-library-from-writable-path

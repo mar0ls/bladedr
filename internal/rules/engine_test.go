@@ -430,3 +430,46 @@ func TestBuiltinRulesFireOnMaliciousSnapshot(t *testing.T) {
 		t.Errorf("shell-child-of-web-server should fire once (sh, direct child of nginx 6200, not the unrelated bash under init), got %d", got["shell-child-of-web-server"])
 	}
 }
+
+// TestShellChildOfWebServerEvidenceUsesParentKey pins the evidence key the rule
+// reports the parent's exe under. internal/risk/model.go's parentClass buckets
+// findings by the evidence key "parent" specifically (it is what the eBPF
+// sensor's own evidence already uses, see internal/sensor/event.go), so this
+// rule has to use that exact name to feed the same learned feature instead of a
+// parallel one the model never sees.
+func TestShellChildOfWebServerEvidenceUsesParentKey(t *testing.T) {
+	rs, err := Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var selected []Rule
+	for _, r := range rs {
+		if r.ID == "shell-child-of-web-server" {
+			selected = append(selected, r)
+		}
+	}
+	if len(selected) != 1 {
+		t.Fatal("rule missing")
+	}
+	eng, err := NewEngine(selected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap := &probe.Snapshot{Processes: []probe.Process{
+		{PID: 100, Comm: "nginx", Exe: "/usr/sbin/nginx"},
+		{PID: 101, PPID: 100, Comm: "sh", Exe: "/bin/sh", Cmdline: "sh -c id"},
+	}}
+	findings, err := eng.Evaluate(snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(findings) != 1 {
+		t.Fatalf("want 1 finding, got %d", len(findings))
+	}
+	if got := findings[0].Evidence["parent"]; got != "/usr/sbin/nginx" {
+		t.Errorf(`evidence["parent"] = %v, want "/usr/sbin/nginx"`, got)
+	}
+	if _, stillPresent := findings[0].Evidence["parent_exe"]; stillPresent {
+		t.Error(`evidence still has the old "parent_exe" key`)
+	}
+}
