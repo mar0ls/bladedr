@@ -99,8 +99,14 @@ func (r *Runner) responseCommand(host *store.Host, action *store.ResponseAction)
 	case PlaybookKillProcess:
 		pid := action.Params["pid"]
 		expected := shellArg(action.Params["expected_exe"])
+		// readlink -f on /proc/$pid/exe appends " (deleted)" when the backing file is
+		// gone — e.g. exactly what deleted-running-binary flags — while an analyst's
+		// expected_exe (naturally copied from that finding's evidence.exe, which the
+		// probe already stores without the suffix) never carries it. Stripped here so
+		// this guard doesn't refuse the single most likely case this playbook is used
+		// for.
 		inspect := `pid=` + pid + `; if [ ! -e "/proc/$pid" ]; then echo "process $pid already absent"; exit 0; fi; ` +
-			`actual=$(readlink -f "/proc/$pid/exe") || exit 1; printf 'pid=%s exe=%s\n' "$pid" "$actual"; ` +
+			`actual=$(readlink -f "/proc/$pid/exe") || exit 1; actual="${actual% (deleted)}"; printf 'pid=%s exe=%s\n' "$pid" "$actual"; ` +
 			`[ "$actual" = ` + expected + ` ] || { echo "executable mismatch; refusing" >&2; exit 1; }`
 		if action.DryRun {
 			return inspect + `; echo 'dry-run: would send SIGTERM'`, nil
