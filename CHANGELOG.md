@@ -3,6 +3,51 @@
 Notable changes. Format loosely follows [Keep a Changelog](https://keepachangelog.com);
 versions follow [SemVer](https://semver.org).
 
+## [0.9.5] - 2026-10-24
+
+Four findings from continued review after 0.9.4: a password-only MFA bypass
+(`setupMFA` could silently disable or take over an account's second factor), a
+response action that couldn't kill the exact kind of process it exists to kill,
+a false positive from containerd's own image-unpacking, and a new detection rule
+for web-shell/command-injection pivots.
+
+### Fixed
+
+- `setupMFA` only ever checked the password, even when the account already had
+  MFA enabled, and would silently generate and store a replacement secret with
+  `MFAEnabled` reset to `false` before any new code was confirmed. Anyone who
+  obtained just the password — the one credential MFA exists to contain the
+  blast radius of — could use it to disable MFA immediately or take over the
+  account under a secret of their own choosing. `disableMFA` has always
+  required the password *and* a current MFA code; `setupMFA` now holds the
+  same bar once MFA is enabled. A first-time setup still needs only the
+  password.
+- `kill_process`'s PID-reuse guard read `/proc/$pid/exe` via `readlink -f` and
+  compared it to `expected_exe`, but `readlink -f` appends `" (deleted)"` once
+  the backing file is gone — exactly the `deleted-running-binary` case, one of
+  this EDR's own detections and a prime candidate for this playbook.
+  `expected_exe`, naturally copied from that finding's evidence (stored
+  without the suffix), never matched, so the guard refused to kill exactly
+  the process an analyst would most want to. The live reading is now
+  normalized the same way before comparing.
+- `suid-in-writable-path` flagged standard shadow-utils/util-linux SUID
+  binaries (`su`, `passwd`, `mount`, ...) momentarily visible under a
+  containerd layer-extraction scratch directory while an image was being
+  unpacked — not an attacker-planted binary. The collector now skips anything
+  under a `containerd-mount<random>` directory.
+
+### Added
+
+- New rule `shell-child-of-web-server` (execution, T1059.004): a shell process
+  whose direct OS parent is a web server binary — the shape of a web shell or
+  command-injection pivot. Fills in what had been the thinnest-covered
+  detection tactic (execution had one rule before this). Left medium, not
+  critical, since `php-fpm`'s own `shell_exec()`/`system()` produces the
+  identical shape for a legitimate app shelling out to a CLI tool — the
+  ambiguity is left for the risk model to learn from. `poligon` gets a
+  matching technique and the helper gains `--spawn-shell` to give it a real
+  child process with the right PPID.
+
 ## [0.9.4] - 2026-10-21
 
 A STRIDE-style review of the sensor/SSH/audit paths, five findings fixed with
