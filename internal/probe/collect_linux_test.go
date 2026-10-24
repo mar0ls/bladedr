@@ -408,3 +408,85 @@ func TestRealPath(t *testing.T) {
 		t.Errorf("realPath(missing) = %q, want %q (fallback to input)", got, missing)
 	}
 }
+
+func TestUnderContainerdMountScratch(t *testing.T) {
+	cases := []struct {
+		path string
+		want bool
+	}{
+		{"/tmp/containerd-mount4224209112/usr/bin/su", true},
+		{"/tmp/evil/containerd-mount123/payload", true},
+		{"/tmp/containerd-mount", true},
+		{"/tmp/evilcontainerd-mount123/payload", false}, // prefix match is per path segment, not substring
+		{"/tmp/payload", false},
+		{"/var/tmp/legit", false},
+	}
+	for _, c := range cases {
+		if got := underContainerdMountScratch(c.path); got != c.want {
+			t.Errorf("underContainerdMountScratch(%q) = %v, want %v", c.path, got, c.want)
+		}
+	}
+}
+
+// TestCollectSuspiciousFilesSkipsContainerdMountScratch is the regression test for
+// the false positive observed in the fleet (vps-38766e17, 2026-10-23): eight
+// suid-in-writable-path findings, all standard shadow-utils/util-linux binaries
+// (su, passwd, mount, ...) momentarily visible under a containerd layer-extraction
+// scratch directory, not planted by an attacker. collectSuspiciousFiles hardcodes
+// the real /tmp, /var/tmp, /dev/shm, /dev, so the fixture has to live under the
+// real /tmp for the walk to find it.
+func TestCollectSuspiciousFilesSkipsContainerdMountScratch(t *testing.T) {
+	scratch, err := os.MkdirTemp("/tmp", "containerd-mount")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(scratch) })
+	bin := filepath.Join(scratch, "usr", "bin")
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// os.Chmod takes an os.FileMode, whose ModeSetuid is a distinct high bit, not
+	// the traditional raw-Unix 04000 — passing the literal octal 0o4755 sets
+	// permission bits 0755 plus an unrelated, meaningless bit, and silently does
+	// NOT set setuid. os.ModeSetuid is the only correct way to ask for it here.
+	const setuidMode = 0o755 | os.ModeSetuid
+	su := filepath.Join(bin, "su")
+	if err := os.WriteFile(su, []byte("fake su"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(su, setuidMode); err != nil {
+		t.Fatal(err)
+	}
+
+	// A sibling SUID file outside any containerd-mount directory must still be
+	// reported — the fix must not go blind to real findings under /tmp.
+	real, err := os.MkdirTemp("/tmp", "not-containerd-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(real) })
+	evil := filepath.Join(real, "evil-suid")
+	if err := os.WriteFile(evil, []byte("fake evil"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(evil, setuidMode); err != nil {
+		t.Fatal(err)
+	}
+
+	found := collectSuspiciousFiles()
+	var sawScratch, sawReal bool
+	for _, f := range found {
+		if f.Path == su {
+			sawScratch = true
+		}
+		if f.Path == evil {
+			sawReal = true
+		}
+	}
+	if sawScratch {
+		t.Error("reported a SUID binary inside a containerd-mount scratch directory as suspicious")
+	}
+	if !sawReal {
+		t.Error("a genuine SUID binary outside containerd-mount was not reported")
+	}
+}

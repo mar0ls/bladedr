@@ -374,6 +374,15 @@ revshell-proc:plant)
   bg "$RUNDIR/revshell.pid" bash -c "exec -a '$rs' $LABDIR/helper" ;;   # cmdline = the reverse-shell string
 revshell-proc:clean) kill_pid "$RUNDIR/revshell.pid" ;;
 
+shell-child-of-web-server:plant)
+  fake_srv="$(pick /tmp/.x/nginx /var/lib/node-metrics/nginx)"
+  mkdir -p "$(dirname "$fake_srv")"; cp $LABDIR/helper "$fake_srv"
+  # /proc/PID/exe of the shell child this spawns has the real OS parent/child
+  # relationship the rule's snapshot.processes lookup needs — a spoofed argv
+  # (exec -a, like revshell-proc above) wouldn't give the child the right PPID.
+  bg "$RUNDIR/web-parent.pid" "$fake_srv" --spawn-shell ;;
+shell-child-of-web-server:clean) kill_pid "$RUNDIR/web-parent.pid"; rm -rf /tmp/.x/nginx /var/lib/node-metrics ;;
+
 ssh-tunnel-proc:plant)
   bg "$RUNDIR/ssh-tunnel.pid" bash -c "exec -a ssh $LABDIR/helper -fND $(pick 1080 9050) jump@10.0.0.5" ;;
 ssh-tunnel-proc:clean) kill_pid "$RUNDIR/ssh-tunnel.pid" ;;
