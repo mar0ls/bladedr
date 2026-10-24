@@ -20,7 +20,9 @@ func fixtureSnapshot() *probe.Snapshot {
 			{PID: 6200, Comm: "nginx", Exe: "/usr/sbin/nginx", MappedLibsWritable: []string{"/tmp/.x/libhook.so"}},
 			{PID: 6201, Comm: "postgres", Exe: "/usr/lib/postgresql/16/bin/postgres", MappedLibsDeleted: []string{"/run/.x/libgone.so"}},
 			{PID: 6202, Comm: "cron", Exe: "/usr/sbin/cron", PreloadEnv: "LD_PRELOAD=/tmp/.x/evil.so"},
-			{PID: 6203, Comm: "apache2", Exe: "/usr/sbin/apache2", PreloadEnv: ""}, // benign: no library finding
+			{PID: 6203, Comm: "apache2", Exe: "/usr/sbin/apache2", PreloadEnv: ""},   // benign: no library finding
+			{PID: 6300, PPID: 6200, Comm: "sh", Exe: "/bin/sh", Cmdline: "sh -c id"}, // webshell pivot: direct child of nginx (6200)
+			{PID: 6301, PPID: 1, Comm: "bash", Exe: "/bin/bash", Cmdline: "bash"},    // benign: shell with no web-server parent
 		},
 		ListeningSockets: []probe.Socket{
 			{Proto: "tcp", LAddr: "0.0.0.0", LPort: 4444, PID: 4711, Comm: "payload"},
@@ -423,5 +425,51 @@ func TestBuiltinRulesFireOnMaliciousSnapshot(t *testing.T) {
 	}
 	if got["kernel-out-of-tree-module-load"] != 1 {
 		t.Errorf("oot-module rule should fire once, got %d", got["kernel-out-of-tree-module-load"])
+	}
+	if got["shell-child-of-web-server"] != 1 {
+		t.Errorf("shell-child-of-web-server should fire once (sh, direct child of nginx 6200, not the unrelated bash under init), got %d", got["shell-child-of-web-server"])
+	}
+}
+
+// TestShellChildOfWebServerEvidenceUsesParentKey pins the evidence key the rule
+// reports the parent's exe under. internal/risk/model.go's parentClass buckets
+// findings by the evidence key "parent" specifically (it is what the eBPF
+// sensor's own evidence already uses, see internal/sensor/event.go), so this
+// rule has to use that exact name to feed the same learned feature instead of a
+// parallel one the model never sees.
+func TestShellChildOfWebServerEvidenceUsesParentKey(t *testing.T) {
+	rs, err := Builtin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var selected []Rule
+	for _, r := range rs {
+		if r.ID == "shell-child-of-web-server" {
+			selected = append(selected, r)
+		}
+	}
+	if len(selected) != 1 {
+		t.Fatal("rule missing")
+	}
+	eng, err := NewEngine(selected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap := &probe.Snapshot{Processes: []probe.Process{
+		{PID: 100, Comm: "nginx", Exe: "/usr/sbin/nginx"},
+		{PID: 101, PPID: 100, Comm: "sh", Exe: "/bin/sh", Cmdline: "sh -c id"},
+	}}
+	findings, err := eng.Evaluate(snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(findings) != 1 {
+		t.Fatalf("want 1 finding, got %d", len(findings))
+	}
+	if got := findings[0].Evidence["parent"]; got != "/usr/sbin/nginx" {
+		t.Errorf(`evidence["parent"] = %v, want "/usr/sbin/nginx"`, got)
+	}
+	if _, stillPresent := findings[0].Evidence["parent_exe"]; stillPresent {
+		t.Error(`evidence still has the old "parent_exe" key`)
 	}
 }
