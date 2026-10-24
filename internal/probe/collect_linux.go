@@ -2844,11 +2844,21 @@ func parseAuthKey(line string) AuthKey {
 
 // collectSuspiciousFiles does a shallow, bounded walk of writable/volatile dirs
 // looking for setuid binaries, hidden executables, and files carrying capabilities
-// — all unusual there.
+// — all unusual there. Skips containerd's layer-extraction scratch directories
+// (named "containerd-mount<random>", one of its own os.MkdirTemp staging dirs
+// under the system tmp): a container image layer being unpacked there legitimately
+// contains the image's own SUID utilities (su, passwd, mount, ...) and
+// capability-carrying binaries, momentarily visible under /tmp before containerd
+// moves the layer into place. Confirmed in the fleet (vps-38766e17, 2026-10-23):
+// eight suid-in-writable-path findings, all standard shadow-utils/util-linux
+// binaries under one such directory.
 func collectSuspiciousFiles() []FileEntry {
 	var out []FileEntry
 	for _, dir := range []string{"/tmp", "/var/tmp", "/dev/shm", "/dev"} {
 		walkDirBounded(dir, 3, func(path string, info os.FileInfo) {
+			if underContainerdMountScratch(path) {
+				return
+			}
 			mode := info.Mode()
 			if mode.IsDir() || !mode.IsRegular() {
 				return
@@ -2870,6 +2880,19 @@ func collectSuspiciousFiles() []FileEntry {
 		})
 	}
 	return out
+}
+
+// underContainerdMountScratch reports whether path falls under a containerd
+// layer-extraction scratch directory, identified by containerd's own naming
+// convention for the temp dir it stages an unpacked layer in before moving it
+// into place (see collectSuspiciousFiles).
+func underContainerdMountScratch(path string) bool {
+	for _, part := range strings.Split(path, string(filepath.Separator)) {
+		if strings.HasPrefix(part, "containerd-mount") {
+			return true
+		}
+	}
+	return false
 }
 
 // octalMode renders permission bits including setuid/setgid/sticky (e.g. "4755").
