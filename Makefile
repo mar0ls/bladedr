@@ -1,4 +1,4 @@
-.PHONY: build build-probe-linux test vet run demo clean tidy deploy stop migrate sensor lab
+.PHONY: build build-probe-linux test vet run demo clean tidy deploy stop sensor lab
 
 BIN := bin
 LDFLAGS :=
@@ -49,9 +49,6 @@ lab: ## Run the attack-emulation range: plant techniques, scan, emit labelled ML
 	GOOS=linux GOARCH=amd64 go build -o $(BIN)/bladedr-probe.linux-amd64 ./cmd/bladedr-probe
 	GOOS=linux GOARCH=arm64 go build -o $(BIN)/bladedr-probe.linux-arm64 ./cmd/bladedr-probe
 	go run ./cmd/bladedr-lab
-
-migrate: ## Apply the DB schema manually (the server also auto-migrates on startup)
-	docker compose exec -T db psql -U bladedr -d bladedr -v ON_ERROR_STOP=1 < internal/store/migrations/0001_init.sql
 
 stop: ## Stop the server (Postgres keeps running; `docker compose down` to stop it too)
 	pkill -f 'bin/bladedr-server' || true

@@ -1,13 +1,16 @@
 # A complete bladedr stack from the published image: control plane + database.
+# Step-by-step walkthrough: docs/deployment.md.
 #
-# Copy this next to a .env file and bring it up:
+# Copy this file into an empty directory, put a .env file next to it and bring it up:
 #
-#   ./bladedr-server -keygen                      # or: docker run --rm mar0ls/bladedr -keygen
+#   docker run --rm mar0ls/bladedr:0.9.5 -keygen   # prints BLADEDR_NODE_KEY=…
 #   cat > .env <<EOF
 #   BLADEDR_NODE_KEY=<the key it printed>
-#   POSTGRES_PASSWORD=<something long and random>
+#   POSTGRES_PASSWORD=$(openssl rand -hex 24)
 #   EOF
+#   chmod 600 .env
 #   docker compose -f compose.example.yml up -d
+#   docker compose -f compose.example.yml logs server | grep 'GENERATED password'
 #
 # The repository's own docker-compose.yml is the database alone, for developing against
 # a locally built binary. This file is the deployment one.
@@ -24,6 +27,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
       POSTGRES_DB: bladedr
     volumes:
+      # PG18+ images expect the mount at /var/lib/postgresql (data goes in a subdir).
       - bladedr_pgdata:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U bladedr"]
@@ -36,7 +40,7 @@ services:
   server:
     # Pin the version. `latest` moves under you on the next release, and this is the
     # component holding SSH access to your fleet.
-    image: mar0ls/bladedr:0.9.3
+    image: mar0ls/bladedr:0.9.5
     restart: unless-stopped
     depends_on:
       db:
@@ -48,9 +52,21 @@ services:
       # Without it the server mints an ephemeral key and forgets your credentials on
       # restart, so this is required rather than defaulted.
       BLADEDR_NODE_KEY: ${BLADEDR_NODE_KEY:?run -keygen and put the key in .env}
-      # Printed once at first start if unset, and must be changed at first sign-in.
-      # BLADEDR_ADMIN_PASSWORD: ""
+      # Empty = a password is generated, printed once to the log, and must be changed at
+      # first sign-in. Set it in .env to choose one yourself (then it isn't forced).
+      BLADEDR_ADMIN_PASSWORD: ${BLADEDR_ADMIN_PASSWORD:-}
+      # How monitored hosts reach this server, e.g. http://10.0.0.2:8080. Needed by the
+      # eBPF sensor (it posts events here) and by the isolate_host response playbook,
+      # which keeps exactly this address reachable — so use a literal IP, not a DNS
+      # name. Agentless scanning works without it.
+      BLADEDR_SERVER_URL: ${BLADEDR_SERVER_URL:-}
       BLADEDR_LOG_FORMAT: json
+      # Behind a reverse proxy:
+      # BLADEDR_SECURE_COOKIES: "1"
+      # BLADEDR_TRUSTED_PROXY_CIDRS: 172.16.0.0/12
+      # TLS terminated here (and mount ./tls below; files must be readable by uid 10001):
+      # BLADEDR_TLS_CERT: /etc/bladedr/tls/tls.crt
+      # BLADEDR_TLS_KEY: /etc/bladedr/tls/tls.key
     ports:
       # Loopback only, because this serves plaintext HTTP as configured here. Put a
       # reverse proxy in front of it, or give the server a certificate with
@@ -58,6 +74,11 @@ services:
       # set BLADEDR_SECURE_COOKIES=1 and BLADEDR_TRUSTED_PROXY_CIDRS, or the login
       # lockout and the audit log will attribute everything to the proxy.
       - "127.0.0.1:8080:8080"
+    # The image's healthcheck polls plaintext http://127.0.0.1:8080/readyz. With TLS on
+    # it fails and the container shows as unhealthy; replace it:
+    # healthcheck:
+    #   test: ["CMD", "wget", "-q", "-O", "/dev/null", "--no-check-certificate", "https://127.0.0.1:8080/readyz"]
+    #
     # Nothing to mount for agentless scanning: the image already carries the probe for
     # both architectures and uploads it over SSH itself. Add a volumes: block only for
     #

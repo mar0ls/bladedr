@@ -1,6 +1,11 @@
+# Development only: the database alone, for running a locally built bladedr-server
+# against Postgres (see README "Storage"). It has a fixed example password and no
+# control plane. To deploy bladedr, use docs/compose.example.yml — see
+# docs/deployment.md.
+#
 # ParadeDB = PostgreSQL + pg_search (BM25), the bladedr production backend.
 # Bring up with: docker compose up -d
-# The server auto-applies the schema on startup; for a manual apply use `make migrate`.
+# The server applies its migrations on startup; there is no separate schema step.
 services:
   db:
     image: paradedb/paradedb:0.23.5

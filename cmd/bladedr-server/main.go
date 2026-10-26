@@ -464,7 +464,7 @@ func loadPolicyTar() []byte {
 		log.Fatalf("compress policy bundle: %v", err)
 	}
 	if n == 0 {
-		log.Printf("no shield-*.yml policies found in %s; server-push sensor deployment is disabled", dir)
+		log.Printf("no *.yml/*.yaml policies found in %s; server-push sensor deployment is disabled", dir)
 		return nil
 	}
 	log.Printf("loaded %d Tetragon policies for sensor deploy (%d bytes gz)", n, buf.Len())
