@@ -5,7 +5,7 @@
 # .github/workflows/ci.yml: a floating tag lets the contents of a "reproducible"
 # build change under you, which is the entry point for a supply-chain substitution.
 # Refresh both digests deliberately, in their own commit.
-FROM golang:1.26-alpine@sha256:0178a641fbb4858c5f1b48e34bdaabe0350a330a1b1149aabd498d0699ff5fb2 AS build
+FROM golang:1.26-alpine@sha256:27f2d3b83cfc5803c8078f8e730af0f7c431bf067afaec8f60a36fb763187cba AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
@@ -22,7 +22,7 @@ RUN CGO_ENABLED=0 go build -ldflags "-X main.version=${VERSION}" -o /out/bladedr
     CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-X main.version=${VERSION}" -o /out/bladedr-sensor.linux-amd64 ./cmd/bladedr-sensor && \
     CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags "-X main.version=${VERSION}" -o /out/bladedr-sensor.linux-arm64 ./cmd/bladedr-sensor
 
-FROM alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
+FROM alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
 RUN adduser -D -u 10001 bladedr && mkdir -p /etc/bladedr/policies && chown -R bladedr:bladedr /etc/bladedr
 COPY --from=build /out/ /usr/local/bin/
 USER bladedr
