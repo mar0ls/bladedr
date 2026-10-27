@@ -485,7 +485,7 @@ bladedr/
 ├── cmd/
 │   ├── bladedr-server/main.go
 │   ├── bladedr-probe/main.go
-│   └── bladedr-sensor/main.go        # Phase 2 (planned)
+│   └── bladedr-sensor/main.go        # eBPF tier (Tetragon wrapper)
 ├── internal/
 │   ├── api/            # REST handlers, routing, auth
 │   ├── store/          # store interface + PostgreSQL impl (pg_search/BM25) + memory

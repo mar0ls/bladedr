@@ -98,7 +98,7 @@ readable.
 The release is a tagged `v1.0.0` that produces:
 
 - a container image on Docker Hub, multi-arch (linux/amd64, linux/arm64), tagged
-  `v1.0.0`, `1.0`, `1` and `latest`
+  `1.0.0`, `1.0`, `1` and `latest` (image tags carry no `v`; the git tag does)
 - static `linux/amd64` and `linux/arm64` binaries for server, probe, sensor and
   `bladectl`
 - an SPDX SBOM and `SHA256SUMS`

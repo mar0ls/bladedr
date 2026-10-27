@@ -31,7 +31,7 @@ See [DESIGN.md](DESIGN.md) for architecture and trust-boundary details.
 - **bladedr-server** — inventory, scan orchestration, rule engine, REST API, web
   console (auth + RBAC). In-memory store by default; Postgres + pg_search (BM25) for
   production (`internal/store/migrations/`).
-- **bladedr-sensor** — the eBPF tier (Phase 2). Thin Tetragon wrapper: loads the
+- **bladedr-sensor** — the optional eBPF tier (Beta). Thin Tetragon wrapper: loads the
   policies, maps hits to observations, posts them to the server. Deployed over SSH,
   runs as a systemd unit.
 - **bladectl** — script-friendly API client: `login`, `hosts`, `scans`, `findings`,
@@ -154,11 +154,14 @@ A case that fails on exactly one backend means that backend is wrong.
 
 ## Deploy
 
-The server runs anywhere; scan targets are always Linux (over SSH).
+The server runs anywhere; scan targets are always Linux (over SSH). **Step-by-step
+install (Docker Compose or binaries + systemd), first steps, TLS, backups and upgrades:
+[docs/deployment.md](docs/deployment.md).**
 
 ```sh
+docker run --rm mar0ls/bladedr:0.9.5 -keygen     # mint BLADEDR_NODE_KEY once, back it up
 docker run -p 127.0.0.1:8080:8080 \
-  -e BLADEDR_DATABASE_URL=postgres://… -e BLADEDR_NODE_KEY=… mar0ls/bladedr:0.9.3
+  -e BLADEDR_DATABASE_URL=postgres://… -e BLADEDR_NODE_KEY=… mar0ls/bladedr:0.9.5
 ```
 
 That is the whole agentless product: the image carries the probe for linux/amd64 and
@@ -179,8 +182,9 @@ guarding your sealed SSH credentials.
 Pin the version. `latest` moves on the next release, and this is the component holding
 SSH access to your fleet.
 
-Running it for real (TLS, systemd, Postgres, backups, hardening): see
-[docs/deployment.md](docs/deployment.md).
+Monitored hosts need SSH, a writable `/tmp` and `flock` (util-linux); root or sudo is
+optional but gives complete scans. The full list is in
+[docs/deployment.md](docs/deployment.md#requirements).
 
 Operational endpoints (unauthenticated, for probes/scrapers): `GET /healthz`
 (liveness), `GET /readyz` (readiness — checks the store is reachable), `GET /metrics`
@@ -467,7 +471,9 @@ Cookies are `HttpOnly` + `SameSite=Lax`, and `Secure` once TLS is on. Failed log
 are rate-limited per source IP (a short lockout that backs off on repeated failures),
 so online password guessing is bounded. An unknown username still costs a full bcrypt
 verification, otherwise login timing would tell an attacker which accounts exist. Keep
-`.bladedr.env` private (gitignored) — it holds the deployment's secrets.
+the deployment's env file private — `.env` next to the compose file, `.bladedr.env`
+from `make deploy`, or the systemd `EnvironmentFile` (all mode 0600) — it holds the
+node key.
 
 ## Credentials and SSH
 
@@ -491,13 +497,15 @@ and rule bundle are first copied into a root-owned temp dir and re-hashed there,
 whoever holds the scan account — without its sudo password — cannot swap the cached
 binary and be handed root by the next scan.
 
-The probe is cached under its sha256 so repeat scans skip the upload. Each scan removes
-probes of other versions and leftover rule bundles older than an hour, so the cache holds
-one probe (about 17 MB), not one per release.
+Before launching the probe the scan takes a host-side `flock`, so a reclaimed queue
+lease can't start a second privileged collector next to the first; a host without
+`flock` fails the scan instead of running unlocked.
 
-The probe is cached under its content hash so scheduled scans skip the multi-MB
-upload. On a host that may already be compromised that cache is a code-execution
-path, and `/tmp` is world-writable, so two checks gate it:
+The probe is cached under its sha256 so repeat scans skip the multi-MB upload. Each
+scan removes probes of other versions and leftover rule bundles older than an hour, so
+the cache holds one probe (about 17 MB), not one per release. On a host that may
+already be compromised that cache is a code-execution path, and `/tmp` is
+world-writable, so two checks gate it:
 
 - the staging directory must be mode `0700` and owned by the scan account, checked
   with a non-dereferencing `ls -ld` so a symlink at the path is rejected;
