@@ -1,8 +1,10 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"net/http"
+	"strings"
 	"testing"
 
 	"bladedr/internal/rules"
@@ -29,6 +31,24 @@ func TestUIPagesRender(t *testing.T) {
 	}
 }
 
+// The bare address used to answer 401. Signed out it must lead into the console, which
+// then sends the visitor on to the login page; a path that does not exist must still
+// not be mistaken for the root.
+func TestBareAddressLeadsToTheConsole(t *testing.T) {
+	a, _ := newTestAPI(t)
+	w := do(a, "GET", "/", "", nil)
+	if w.Code != http.StatusFound || w.Header().Get("Location") != "/ui/dashboard" {
+		t.Fatalf("GET / signed out = %d Location=%q, want 302 to /ui/dashboard", w.Code, w.Header().Get("Location"))
+	}
+	w = do(a, "GET", "/ui/dashboard", "", nil)
+	if w.Code != http.StatusSeeOther || w.Header().Get("Location") != "/ui/login" {
+		t.Fatalf("GET /ui/dashboard signed out = %d Location=%q, want a redirect to /ui/login", w.Code, w.Header().Get("Location"))
+	}
+	if w := do(a, "GET", "/no-such-page", "", nil); w.Code == http.StatusFound || w.Code == http.StatusOK {
+		t.Fatalf("GET /no-such-page = %d, must not be treated as the root", w.Code)
+	}
+}
+
 func TestUIRootRedirectsToDashboard(t *testing.T) {
 	a, tok := newTestAPI(t)
 	w := do(a, "GET", "/ui", tok[store.RoleAdmin], nil)
@@ -41,6 +61,34 @@ func TestUILoginPageIsPublic(t *testing.T) {
 	a, _ := newTestAPI(t)
 	if w := do(a, "GET", "/ui/login", "", nil); w.Code != http.StatusOK {
 		t.Fatalf("GET /ui/login = %d, want 200", w.Code)
+	}
+}
+
+// The tab icon is requested by the browser without credentials, including on the login
+// page, so it must be reachable signed out, and every page must name it.
+func TestUIFaviconIsPublicAndLinked(t *testing.T) {
+	a, tok := newTestAPI(t)
+	for _, p := range []string{"/ui/favicon.png", "/favicon.ico"} {
+		w := do(a, "GET", p, "", nil)
+		if w.Code != http.StatusOK {
+			t.Fatalf("GET %s signed out = %d, want 200", p, w.Code)
+		}
+		if ct := w.Header().Get("Content-Type"); ct != "image/png" {
+			t.Errorf("GET %s Content-Type = %q, want image/png", p, ct)
+		}
+		if !bytes.HasPrefix(w.Body.Bytes(), []byte("\x89PNG\r\n\x1a\n")) {
+			t.Errorf("GET %s did not return a PNG", p)
+		}
+	}
+	for _, p := range []string{"/ui/login", "/ui/dashboard"} {
+		token := ""
+		if p != "/ui/login" {
+			token = tok[store.RoleAdmin]
+		}
+		body := do(a, "GET", p, token, nil).Body.String()
+		if !strings.Contains(body, `rel="icon"`) || !strings.Contains(body, "/ui/favicon.png") {
+			t.Errorf("GET %s does not link the tab icon", p)
+		}
 	}
 }
 

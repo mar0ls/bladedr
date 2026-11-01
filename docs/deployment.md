@@ -1,7 +1,7 @@
 # Deploying bladedr
 
 How to run the control plane for real. The [README](../README.md) covers what the
-pieces are; this is about wiring them up. Current release: **0.9.5**.
+pieces are; this is about wiring them up. Current release: **0.9.6**.
 
 - [Layout](#layout)
 - [Requirements](#requirements)
@@ -68,13 +68,13 @@ compiled in. You need no checkout of this repository.
 ```sh
 mkdir -p /opt/bladedr && cd /opt/bladedr
 curl -fsSLo compose.yml \
-  https://raw.githubusercontent.com/mar0ls/bladedr/v0.9.5/docs/compose.example.yml
+  https://raw.githubusercontent.com/mar0ls/bladedr/v0.9.6/docs/compose.example.yml
 ```
 
 **2. Create `.env`**
 
 ```sh
-docker run --rm mar0ls/bladedr:0.9.5 -keygen
+docker run --rm mar0ls/bladedr:0.9.6 -keygen
 # BLADEDR_NODE_KEY=…   # private (node) — keep secret
 # public_key=…         # seals credentials
 
@@ -87,6 +87,10 @@ POSTGRES_PASSWORD=$(openssl rand -hex 24)
 EOF
 chmod 600 .env
 ```
+
+Prefer a template? [`.env.example`](.env.example) lists every setting with how to fill it
+in (`curl -fsSLo .env https://raw.githubusercontent.com/mar0ls/bladedr/v0.9.6/docs/.env.example`),
+and covers both compose files.
 
 Back up `BLADEDR_NODE_KEY` somewhere other than this machine **now**. It is the only
 thing that decrypts the stored SSH credentials; see [Secrets](#secrets).
@@ -121,11 +125,38 @@ Continue with [First steps after install](#first-steps-after-install).
   add `- ./policies:/etc/bladedr/policies:ro` under the server's `volumes:`, set
   `BLADEDR_SERVER_URL` in `.env`, and `docker compose up -d`. The server reads the
   bundle at startup, so restart it after changing policies.
-- **TLS on the container:** see the commented lines in `compose.yml`. Key and
-  certificate must be readable by uid 10001, and the image's healthcheck must be
-  swapped for the HTTPS one shown there.
+- **TLS on the container:** use [compose.tls.example.yml](compose.tls.example.yml)
+  instead, see [the next section](#variant-https-in-the-container-self-signed-certificate).
+  Doing it by hand on top of `compose.yml` means the key must be readable by uid 10001
+  and the image's plaintext healthcheck must be replaced with an HTTPS one.
 - **Other settings** (scan workers, retention, …): add them to the server's
   `environment:`. The full list is in the README's [Config](../README.md#config) table.
+
+### Variant: HTTPS in the container, self-signed certificate
+
+[compose.tls.example.yml](compose.tls.example.yml) is the same stack with bladedr
+serving HTTPS itself, so there is no proxy to set up. A one-shot `tls-init` service
+generates a self-signed certificate into `./tls/` on first start and leaves it alone
+afterwards. Use it the same way as above, with these differences:
+
+- `.env` also needs `BLADEDR_ADMIN_PASSWORD` (this file requires it rather than
+  generating one) and, for a certificate that matches how you reach the server,
+  `TLS_DNS` and/or `TLS_IP`. Without them the certificate is issued for `localhost` /
+  `127.0.0.1` only.
+- The console is `https://<TLS_DNS or TLS_IP>:8389/ui` — host port **8389**, not 8080.
+  Set `BLADEDR_PORT` in `.env` to change it; `443` drops the port from the URL.
+  It binds to loopback unless you set `BLADEDR_BIND_ADDRESS=0.0.0.0`; if you do,
+  restrict access with a firewall, because Docker publishes ports ahead of the host
+  firewall's rules.
+- The certificate is valid for 365 days. To renew or change it, stop the stack, delete
+  `./tls`, adjust `TLS_DNS`/`TLS_IP` and start again.
+- **Self-signed means clients must be told to trust it.** Browsers ask once.
+  `bladectl` and the eBPF sensor verify the server certificate and have no option to
+  skip that, so they need `./tls/tls.crt` in the trust store of the machine they run
+  on (on Linux, Go also honours `SSL_CERT_FILE`). If you plan to use the sensor tier
+  on several hosts, a certificate from a real CA — dropped into `./tls/` as `tls.crt`
+  and `tls.key`, readable by uid 10001 — saves that work; `tls-init` leaves existing
+  files untouched.
 
 ## Option B: release binaries + systemd
 
@@ -140,7 +171,7 @@ password.
 **2. Binaries**
 
 ```sh
-V=v0.9.5; ARCH=amd64     # or arm64 — the control plane's own architecture
+V=v0.9.6; ARCH=amd64     # or arm64 — the control plane's own architecture
 base=https://github.com/mar0ls/bladedr/releases/download/$V
 cd "$(mktemp -d)"
 for f in bladedr-server.linux-$ARCH bladectl.linux-$ARCH \
@@ -255,7 +286,7 @@ and forgets every credential on restart.
 
 ```sh
 bladedr-server -keygen                       # binary
-docker run --rm mar0ls/bladedr:0.9.5 -keygen # image
+docker run --rm mar0ls/bladedr:0.9.6 -keygen # image
 ```
 
 Sensor tokens need no such care: they're per-host, the server stores only digests, and

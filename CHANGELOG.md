@@ -3,6 +3,57 @@
 Notable changes. Format loosely follows [Keep a Changelog](https://keepachangelog.com);
 versions follow [SemVer](https://semver.org).
 
+## [0.9.6] - 2026-11-01
+
+Found while putting 0.9.5 behind a reverse proxy: the console had no tab icon and
+the bare address answered with an error. Also a new base image (the old one is past
+end of life) and deployment documentation brought up to date, with a second compose
+example that serves HTTPS itself. No database migrations; replace the image.
+
+### Fixed
+
+- `GET /` answered `401` from the API's auth layer, so typing or bookmarking just
+  the host (`https://bladedr.local`) showed an error instead of the login page. It
+  now redirects to the console, which sends a signed-out visitor to `/ui/login`.
+- The console named no tab icon and served no `/favicon.ico`, so every bladedr tab
+  was blank. It now serves one (the shield from the logo, 64x64) at `/ui/favicon.png`
+  and `/favicon.ico`, reachable without a session because the browser asks for it on
+  the login page.
+- The runtime image was built on Alpine 3.20, which reached end of life in April
+  2026 and no longer receives security fixes. It is now Alpine 3.24, and the Go build
+  image digest is refreshed. Both stay pinned by digest.
+- The server logged `no shield-*.yml policies found` when the policy directory was
+  empty. Any `*.yml` or `*.yaml` is loaded; the message now says so.
+- Removed `make migrate`. It applied only migration 0001 and bypassed
+  `schema_migrations`; the server migrates on startup.
+
+### Added
+
+- `docs/compose.tls.example.yml`: control plane, ParadeDB and a one-shot service that
+  generates a self-signed certificate on first start, so the console is HTTPS
+  without a reverse proxy. The host port is `BLADEDR_PORT` (default 8389). The
+  certificate generator makes the key readable by the server's uid 10001; without
+  that the server exits with `permission denied` on Linux. Clients that verify the
+  server certificate, such as `bladectl` and the eBPF sensor, need that certificate
+  trusted.
+- `docs/.env.example`, a template for both compose files. Required values are empty,
+  so compose refuses to start rather than run on a placeholder password.
+- `docs/dockerhub.md`, the Docker Hub page, kept with the repository.
+
+### Changed
+
+- `docs/deployment.md` is now an install guide: requirements for the control plane
+  and the monitored hosts, Docker Compose and binaries-plus-systemd walkthroughs,
+  first steps, TLS, backup and upgrades. The systemd example now sets
+  `BLADEDR_PROBE_LINUX_*`, without which SSH scans fail with `no probe binary
+  configured`. The section on scan locking, previously marked unreleased, is filed
+  under the 0.9.4 upgrade notes.
+- `docs/compose.example.yml` pins the current release and takes
+  `BLADEDR_SERVER_URL` and an optional `BLADEDR_ADMIN_PASSWORD`.
+  `docker-compose.yml` now says plainly that it is a development database.
+- README: documents the `flock` requirement on scanned hosts (in effect since 0.9.4)
+  and links the install guide.
+
 ## [0.9.5] - 2026-10-24
 
 Four findings from continued review after 0.9.4: a password-only MFA bypass

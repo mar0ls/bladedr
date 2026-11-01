@@ -159,9 +159,9 @@ install (Docker Compose or binaries + systemd), first steps, TLS, backups and up
 [docs/deployment.md](docs/deployment.md).**
 
 ```sh
-docker run --rm mar0ls/bladedr:0.9.5 -keygen     # mint BLADEDR_NODE_KEY once, back it up
+docker run --rm mar0ls/bladedr:0.9.6 -keygen     # mint BLADEDR_NODE_KEY once, back it up
 docker run -p 127.0.0.1:8080:8080 \
-  -e BLADEDR_DATABASE_URL=postgres://… -e BLADEDR_NODE_KEY=… mar0ls/bladedr:0.9.5
+  -e BLADEDR_DATABASE_URL=postgres://… -e BLADEDR_NODE_KEY=… mar0ls/bladedr:0.9.6
 ```
 
 That is the whole agentless product: the image carries the probe for linux/amd64 and
@@ -177,7 +177,10 @@ outside the image:
 [docs/compose.example.yml](docs/compose.example.yml) is a complete stack — control plane
 plus database — with the node key and database password required rather than defaulted,
 so it refuses to start half-configured instead of coming up with an example password
-guarding your sealed SSH credentials.
+guarding your sealed SSH credentials. It serves plaintext HTTP on loopback, for use
+behind a reverse proxy. [docs/compose.tls.example.yml](docs/compose.tls.example.yml) is
+the same stack with bladedr serving HTTPS itself, using a self-signed certificate it
+generates on first start.
 
 Pin the version. `latest` moves on the next release, and this is the component holding
 SSH access to your fleet.

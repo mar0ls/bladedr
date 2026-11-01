@@ -1,0 +1,167 @@
+# Complete bladedr stack: control plane + ParadeDB + a self-signed TLS certificate.
+# Step-by-step walkthrough: docs/deployment.md.
+#
+# Compared with compose.example.yml (plaintext HTTP on loopback, meant to sit behind a
+# reverse proxy), this one terminates TLS in bladedr itself, so the console is HTTPS
+# from the first start. The certificate is self-signed: browsers warn once, and
+# bladectl and sensors do not trust it unless you add ./tls/tls.crt to their trust
+# store. For those, bring a certificate from a real CA (put it in ./tls/ as tls.crt
+# and tls.key) or use compose.example.yml behind a proxy.
+#
+# Put a .env file next to this one (docs/.env.example is a template):
+#   BLADEDR_NODE_KEY=…           # docker run --rm mar0ls/bladedr:0.9.6 -keygen
+#   POSTGRES_PASSWORD=…          # openssl rand -hex 24
+#   BLADEDR_ADMIN_PASSWORD=…     # initial admin password
+#   TLS_DNS=bladedr.example      # name the certificate is issued for (default: localhost)
+#   TLS_IP=203.0.113.10          # IP the certificate is issued for (default: 127.0.0.1)
+#   # Optional:
+#   # BLADEDR_BIND_ADDRESS=0.0.0.0   # default 127.0.0.1; see "ports" below
+#   # BLADEDR_PORT=443               # default 8389
+#   # BLADEDR_SERVER_URL=https://203.0.113.10:8389   # eBPF sensor / isolate_host
+#
+# Start (console: https://<TLS_DNS or TLS_IP>:8389/ui, or the BLADEDR_PORT you set):
+#   chmod 600 .env
+#   docker compose -f compose.tls.example.yml up -d
+#
+# Renew or change the certificate: stop the stack, delete ./tls, update TLS_DNS/TLS_IP
+# in .env, start again. tls-init only generates a certificate when none exists.
+
+services:
+  db:
+    # ParadeDB provides PostgreSQL + pg_search (BM25).
+    image: paradedb/paradedb:0.23.5
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: bladedr
+      # Required; never use a default password for the credential database.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: bladedr
+    volumes:
+      - bladedr_pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bladedr -d bladedr"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    # Not published to the host. Only the server accesses the database.
+
+  # Generates a self-signed certificate once and keeps it in ./tls.
+  tls-init:
+    image: alpine:3.22
+    restart: "no"
+    environment:
+      TLS_DNS: ${TLS_DNS:-localhost}
+      TLS_IP: ${TLS_IP:-127.0.0.1}
+    volumes:
+      - ./tls:/tls
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        if [ ! -s /tls/tls.crt ] || [ ! -s /tls/tls.key ]; then
+          apk add --no-cache openssl
+          openssl req -x509 -newkey rsa:2048 -sha256 \
+            -days 365 -nodes \
+            -keyout /tls/tls.key \
+            -out /tls/tls.crt \
+            -subj "/CN=$$TLS_DNS" \
+            -addext "subjectAltName=DNS:$$TLS_DNS,IP:$$TLS_IP"
+          chmod 644 /tls/tls.crt
+          # This container runs as root but the server runs as uid 10001 (see the
+          # image's USER). Without the chown the key is unreadable to it and the
+          # server exits with "open /etc/bladedr/tls/tls.key: permission denied".
+          chown 10001:10001 /tls/tls.key
+          chmod 600 /tls/tls.key
+        fi
+        test -s /tls/tls.crt
+        test -s /tls/tls.key
+
+  server:
+    # Pin the version; this component holds SSH access to your fleet.
+    image: mar0ls/bladedr:0.9.6
+    restart: unless-stopped
+
+    # The image's own healthcheck speaks plaintext; this one speaks HTTPS to itself.
+    healthcheck:
+      test:
+        - CMD
+        - /bin/sh
+        - -ec
+        - |
+          wget --no-check-certificate -q -O /dev/null \
+            https://127.0.0.1:8080/readyz
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+
+    depends_on:
+      db:
+        condition: service_healthy
+      tls-init:
+        condition: service_completed_successfully
+
+    environment:
+      BLADEDR_DATABASE_URL: postgres://bladedr:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@db:5432/bladedr
+
+      # Required to decrypt stored SSH credentials.
+      # Back this up separately from the database.
+      BLADEDR_NODE_KEY: ${BLADEDR_NODE_KEY:?run -keygen and put the key in .env}
+
+      # Required in this file: the initial administrator's password. Because you chose
+      # it, it is not forced to change at first sign-in. To have one generated and
+      # printed once in the log instead, change this line to ${BLADEDR_ADMIN_PASSWORD:-}.
+      BLADEDR_ADMIN_PASSWORD: ${BLADEDR_ADMIN_PASSWORD:?set BLADEDR_ADMIN_PASSWORD in .env}
+
+      # How monitored hosts reach this server. Needed by the eBPF sensor (it posts
+      # events here) and by the isolate_host response playbook, which keeps exactly
+      # this address reachable, so use a literal IP rather than a DNS name.
+      # Agentless scanning works without it.
+      BLADEDR_SERVER_URL: ${BLADEDR_SERVER_URL:-}
+
+      BLADEDR_LOG_FORMAT: json
+
+      # TLS served directly by bladedr.
+      BLADEDR_TLS_CERT: /etc/bladedr/tls/tls.crt
+      BLADEDR_TLS_KEY: /etc/bladedr/tls/tls.key
+
+      # TLS enables Secure cookies automatically.
+      # Set explicitly if needed:
+      BLADEDR_SECURE_COOKIES: "1"
+
+      # Only configure this when using a trusted reverse proxy.
+      # Use the actual proxy source CIDR(s), not arbitrary client networks.
+      # BLADEDR_TRUSTED_PROXY_CIDRS: "127.0.0.1/32"
+
+      # Optional operational settings:
+      # BLADEDR_LOG_LEVEL: info
+      # BLADEDR_SCAN_WORKERS: "4"
+      # BLADEDR_SCAN_TIMEOUT: 5m
+      # BLADEDR_SCHEDULER_TICK: 30s
+      # BLADEDR_EXPORT_WORKERS: "2"
+
+      # Optional rule directory:
+      # BLADEDR_RULES_DIR: /etc/bladedr/rules
+
+      # Optional eBPF policy directory (the image already defaults to this path):
+      # BLADEDR_POLICY_DIR: /etc/bladedr/policies
+
+    ports:
+      # Defaults to loopback-only. For direct external HTTPS,
+      # set BLADEDR_BIND_ADDRESS=0.0.0.0 in .env and restrict
+      # access with your firewall. The host port (BLADEDR_PORT, default 8389) maps to the
+      # container's 8080; set BLADEDR_PORT=443 to reach the console at https://<name>/ui
+      # with no port in the URL.
+      - "${BLADEDR_BIND_ADDRESS:-127.0.0.1}:${BLADEDR_PORT:-8389}:8080"
+
+    volumes:
+      # Certificate and private key are read-only inside the server.
+      - ./tls:/etc/bladedr/tls:ro
+
+      # Optional custom rule pack:
+      # - ./rules:/etc/bladedr/rules:ro
+
+      # Optional eBPF policy bundle (you must supply the policies):
+      - ./policies:/etc/bladedr/policies:ro
+
+volumes:
+  bladedr_pgdata:

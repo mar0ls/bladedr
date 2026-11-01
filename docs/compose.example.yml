@@ -1,9 +1,10 @@
 # A complete bladedr stack from the published image: control plane + database.
 # Step-by-step walkthrough: docs/deployment.md.
 #
-# Copy this file into an empty directory, put a .env file next to it and bring it up:
+# Copy this file into an empty directory, put a .env file next to it (docs/.env.example
+# is a template) and bring it up:
 #
-#   docker run --rm mar0ls/bladedr:0.9.5 -keygen   # prints BLADEDR_NODE_KEY=…
+#   docker run --rm mar0ls/bladedr:0.9.6 -keygen   # prints BLADEDR_NODE_KEY=…
 #   cat > .env <<EOF
 #   BLADEDR_NODE_KEY=<the key it printed>
 #   POSTGRES_PASSWORD=$(openssl rand -hex 24)
@@ -40,7 +41,7 @@ services:
   server:
     # Pin the version. `latest` moves under you on the next release, and this is the
     # component holding SSH access to your fleet.
-    image: mar0ls/bladedr:0.9.5
+    image: mar0ls/bladedr:0.9.6
     restart: unless-stopped
     depends_on:
       db:
