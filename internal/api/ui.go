@@ -21,6 +21,12 @@ var uiFS embed.FS
 //go:embed logo.png
 var uiLogo []byte
 
+// The browser-tab icon: the shield cropped out of the logo. The full logo carries a
+// wordmark that is unreadable at 16px.
+//
+//go:embed favicon.png
+var uiFavicon []byte
+
 var uiFuncs = template.FuncMap{
 	// mitreURL builds the ATT&CK page URL, mapping sub-techniques T1543.002 ->
 	// .../techniques/T1543/002/.
@@ -174,6 +180,17 @@ func (a *API) registerUI(mux *http.ServeMux) {
 		// nosemgrep: go.lang.security.audit.xss.no-direct-write-to-responsewriter.no-direct-write-to-responsewriter
 		w.Write(uiLogo)
 	})
+	// /favicon.ico is what a browser asks for on its own when a page names no icon (or
+	// before it has parsed one); it accepts PNG bytes there.
+	for _, path := range []string{"GET /ui/favicon.png", "GET /favicon.ico"} {
+		mux.HandleFunc(path, func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "image/png")
+			w.Header().Set("Cache-Control", "public, max-age=86400")
+			// static embedded asset, not user-controlled data
+			// nosemgrep: go.lang.security.audit.xss.no-direct-write-to-responsewriter.no-direct-write-to-responsewriter
+			w.Write(uiFavicon)
+		})
+	}
 	mux.HandleFunc("GET /ui/users", a.uiUsers)
 	mux.HandleFunc("GET /ui/audit", a.uiAudit)
 }

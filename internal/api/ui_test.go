@@ -1,8 +1,10 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"net/http"
+	"strings"
 	"testing"
 
 	"bladedr/internal/rules"
@@ -41,6 +43,34 @@ func TestUILoginPageIsPublic(t *testing.T) {
 	a, _ := newTestAPI(t)
 	if w := do(a, "GET", "/ui/login", "", nil); w.Code != http.StatusOK {
 		t.Fatalf("GET /ui/login = %d, want 200", w.Code)
+	}
+}
+
+// The tab icon is requested by the browser without credentials, including on the login
+// page, so it must be reachable signed out, and every page must name it.
+func TestUIFaviconIsPublicAndLinked(t *testing.T) {
+	a, tok := newTestAPI(t)
+	for _, p := range []string{"/ui/favicon.png", "/favicon.ico"} {
+		w := do(a, "GET", p, "", nil)
+		if w.Code != http.StatusOK {
+			t.Fatalf("GET %s signed out = %d, want 200", p, w.Code)
+		}
+		if ct := w.Header().Get("Content-Type"); ct != "image/png" {
+			t.Errorf("GET %s Content-Type = %q, want image/png", p, ct)
+		}
+		if !bytes.HasPrefix(w.Body.Bytes(), []byte("\x89PNG\r\n\x1a\n")) {
+			t.Errorf("GET %s did not return a PNG", p)
+		}
+	}
+	for _, p := range []string{"/ui/login", "/ui/dashboard"} {
+		token := ""
+		if p != "/ui/login" {
+			token = tok[store.RoleAdmin]
+		}
+		body := do(a, "GET", p, token, nil).Body.String()
+		if !strings.Contains(body, `rel="icon"`) || !strings.Contains(body, "/ui/favicon.png") {
+			t.Errorf("GET %s does not link the tab icon", p)
+		}
 	}
 }
 
