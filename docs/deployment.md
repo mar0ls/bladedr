@@ -144,6 +144,7 @@ afterwards. Use it the same way as above, with these differences:
   `TLS_DNS` and/or `TLS_IP`. Without them the certificate is issued for `localhost` /
   `127.0.0.1` only.
 - The console is `https://<TLS_DNS or TLS_IP>:8389/ui` — host port **8389**, not 8080.
+  Set `BLADEDR_PORT` in `.env` to change it; `443` drops the port from the URL.
   It binds to loopback unless you set `BLADEDR_BIND_ADDRESS=0.0.0.0`; if you do,
   restrict access with a firewall, because Docker publishes ports ahead of the host
   firewall's rules.

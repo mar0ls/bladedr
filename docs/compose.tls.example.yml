@@ -16,9 +16,10 @@
 #   TLS_IP=203.0.113.10          # IP the certificate is issued for (default: 127.0.0.1)
 #   # Optional:
 #   # BLADEDR_BIND_ADDRESS=0.0.0.0   # default 127.0.0.1; see "ports" below
+#   # BLADEDR_PORT=443               # default 8389
 #   # BLADEDR_SERVER_URL=https://203.0.113.10:8389   # eBPF sensor / isolate_host
 #
-# Start (console: https://<TLS_DNS or TLS_IP>:8389/ui):
+# Start (console: https://<TLS_DNS or TLS_IP>:8389/ui, or the BLADEDR_PORT you set):
 #   chmod 600 .env
 #   docker compose -f compose.tls.example.yml up -d
 #
@@ -147,8 +148,10 @@ services:
     ports:
       # Defaults to loopback-only. For direct external HTTPS,
       # set BLADEDR_BIND_ADDRESS=0.0.0.0 in .env and restrict
-      # access with your firewall. Host port 8389 maps to the container's 8080.
-      - "${BLADEDR_BIND_ADDRESS:-127.0.0.1}:8389:8080"
+      # access with your firewall. The host port (BLADEDR_PORT, default 8389) maps to the
+      # container's 8080; set BLADEDR_PORT=443 to reach the console at https://<name>/ui
+      # with no port in the URL.
+      - "${BLADEDR_BIND_ADDRESS:-127.0.0.1}:${BLADEDR_PORT:-8389}:8080"
 
     volumes:
       # Certificate and private key are read-only inside the server.
