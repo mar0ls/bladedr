@@ -74,7 +74,9 @@ func registeredRoutes(t *testing.T) map[string]bool {
 				return true
 			}
 			method, path, ok := strings.Cut(pattern, " ")
-			if ok && !strings.HasPrefix(path, "/ui") {
+			// /ui... and the bare "/" are the console's entry points, redirects rather
+			// than part of the /api/v1 contract.
+			if ok && !strings.HasPrefix(path, "/ui") && path != "/{$}" {
 				routes[method+" "+path] = true
 			}
 			return true

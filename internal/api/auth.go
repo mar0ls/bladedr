@@ -103,7 +103,7 @@ const userCtxKey ctxKey = 0
 // publicPath routes that need no authentication.
 func publicPath(p string) bool {
 	switch p {
-	case "/healthz", "/readyz", "/metrics", "/openapi.yaml", "/api/v1/login", "/ui/login", "/ui/logo.png", "/ui/favicon.png", "/favicon.ico":
+	case "/", "/healthz", "/readyz", "/metrics", "/openapi.yaml", "/api/v1/login", "/ui/login", "/ui/logo.png", "/ui/favicon.png", "/favicon.ico":
 		return true
 	}
 	return false

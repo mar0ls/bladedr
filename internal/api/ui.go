@@ -157,6 +157,11 @@ func (a *API) uiDashboard(w http.ResponseWriter, r *http.Request) {
 // RegisterUI mounts the server-rendered hunting UI on the mux. It reuses the
 // store directly for reads; triage actions post back to the JSON API.
 func (a *API) registerUI(mux *http.ServeMux) {
+	// The bare address is what people type and bookmark. Without this it answered 401
+	// from the API's auth layer instead of leading to the console.
+	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/ui/dashboard", http.StatusFound)
+	})
 	mux.HandleFunc("GET /ui", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/ui/dashboard", http.StatusFound)
 	})

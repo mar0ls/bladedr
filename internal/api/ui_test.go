@@ -31,6 +31,24 @@ func TestUIPagesRender(t *testing.T) {
 	}
 }
 
+// The bare address used to answer 401. Signed out it must lead into the console, which
+// then sends the visitor on to the login page; a path that does not exist must still
+// not be mistaken for the root.
+func TestBareAddressLeadsToTheConsole(t *testing.T) {
+	a, _ := newTestAPI(t)
+	w := do(a, "GET", "/", "", nil)
+	if w.Code != http.StatusFound || w.Header().Get("Location") != "/ui/dashboard" {
+		t.Fatalf("GET / signed out = %d Location=%q, want 302 to /ui/dashboard", w.Code, w.Header().Get("Location"))
+	}
+	w = do(a, "GET", "/ui/dashboard", "", nil)
+	if w.Code != http.StatusSeeOther || w.Header().Get("Location") != "/ui/login" {
+		t.Fatalf("GET /ui/dashboard signed out = %d Location=%q, want a redirect to /ui/login", w.Code, w.Header().Get("Location"))
+	}
+	if w := do(a, "GET", "/no-such-page", "", nil); w.Code == http.StatusFound || w.Code == http.StatusOK {
+		t.Fatalf("GET /no-such-page = %d, must not be treated as the root", w.Code)
+	}
+}
+
 func TestUIRootRedirectsToDashboard(t *testing.T) {
 	a, tok := newTestAPI(t)
 	w := do(a, "GET", "/ui", tok[store.RoleAdmin], nil)
