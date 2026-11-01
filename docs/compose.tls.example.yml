@@ -9,7 +9,7 @@
 # and tls.key) or use compose.example.yml behind a proxy.
 #
 # Put a .env file next to this one (docs/.env.example is a template):
-#   BLADEDR_NODE_KEY=…           # docker run --rm mar0ls/bladedr:0.9.5 -keygen
+#   BLADEDR_NODE_KEY=…           # docker run --rm mar0ls/bladedr:0.9.6 -keygen
 #   POSTGRES_PASSWORD=…          # openssl rand -hex 24
 #   BLADEDR_ADMIN_PASSWORD=…     # initial admin password
 #   TLS_DNS=bladedr.example      # name the certificate is issued for (default: localhost)
@@ -77,7 +77,7 @@ services:
 
   server:
     # Pin the version; this component holds SSH access to your fleet.
-    image: mar0ls/bladedr:0.9.5
+    image: mar0ls/bladedr:0.9.6
     restart: unless-stopped
 
     # The image's own healthcheck speaks plaintext; this one speaks HTTPS to itself.

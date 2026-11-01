@@ -25,7 +25,7 @@ a node key, and it is a working install.
 
 | Tag | Meaning |
 |---|---|
-| `0.9.5` | Exact release. **Use this.** |
+| `0.9.6` | Exact release. **Use this.** |
 | `0.9` | Newest 0.9.x patch release. |
 | `latest` | Newest stable release. Moves without warning. |
 
@@ -38,9 +38,9 @@ fleet.
 ```sh
 mkdir -p /opt/bladedr && cd /opt/bladedr
 curl -fsSLo compose.yml \
-  https://raw.githubusercontent.com/mar0ls/bladedr/v0.9.5/docs/compose.example.yml
+  https://raw.githubusercontent.com/mar0ls/bladedr/v0.9.6/docs/compose.example.yml
 
-docker run --rm mar0ls/bladedr:0.9.5 -keygen      # prints BLADEDR_NODE_KEY=…
+docker run --rm mar0ls/bladedr:0.9.6 -keygen      # prints BLADEDR_NODE_KEY=…
 cat > .env <<EOF
 BLADEDR_NODE_KEY=<the key it printed>
 POSTGRES_PASSWORD=$(openssl rand -hex 24)
@@ -56,7 +56,7 @@ compose file publishes the console on loopback only, because it serves plaintext
 Put a TLS reverse proxy in front of it, or set `BLADEDR_TLS_CERT`/`BLADEDR_TLS_KEY`.
 
 Prefer HTTPS straight from the container? Use
-[`docs/compose.tls.example.yml`](https://github.com/mar0ls/bladedr/blob/v0.9.5/docs/compose.tls.example.yml)
+[`docs/compose.tls.example.yml`](https://github.com/mar0ls/bladedr/blob/v0.9.6/docs/compose.tls.example.yml)
 instead: it generates a self-signed certificate on first start and serves the console on
 `https://<host>:8389/ui`.
 
@@ -69,7 +69,7 @@ decrypts the stored SSH credentials. If you lose it, the credentials cannot be r
 docker run -d --name bladedr -p 127.0.0.1:8080:8080 \
   -e BLADEDR_DATABASE_URL=postgres://bladedr:…@db-host:5432/bladedr \
   -e BLADEDR_NODE_KEY=… \
-  mar0ls/bladedr:0.9.5
+  mar0ls/bladedr:0.9.6
 ```
 
 The database must be **ParadeDB** (PostgreSQL + pg_search), e.g.

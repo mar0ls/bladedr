@@ -159,9 +159,9 @@ install (Docker Compose or binaries + systemd), first steps, TLS, backups and up
 [docs/deployment.md](docs/deployment.md).**
 
 ```sh
-docker run --rm mar0ls/bladedr:0.9.5 -keygen     # mint BLADEDR_NODE_KEY once, back it up
+docker run --rm mar0ls/bladedr:0.9.6 -keygen     # mint BLADEDR_NODE_KEY once, back it up
 docker run -p 127.0.0.1:8080:8080 \
-  -e BLADEDR_DATABASE_URL=postgres://… -e BLADEDR_NODE_KEY=… mar0ls/bladedr:0.9.5
+  -e BLADEDR_DATABASE_URL=postgres://… -e BLADEDR_NODE_KEY=… mar0ls/bladedr:0.9.6
 ```
 
 That is the whole agentless product: the image carries the probe for linux/amd64 and

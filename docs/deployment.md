@@ -1,7 +1,7 @@
 # Deploying bladedr
 
 How to run the control plane for real. The [README](../README.md) covers what the
-pieces are; this is about wiring them up. Current release: **0.9.5**.
+pieces are; this is about wiring them up. Current release: **0.9.6**.
 
 - [Layout](#layout)
 - [Requirements](#requirements)
@@ -68,13 +68,13 @@ compiled in. You need no checkout of this repository.
 ```sh
 mkdir -p /opt/bladedr && cd /opt/bladedr
 curl -fsSLo compose.yml \
-  https://raw.githubusercontent.com/mar0ls/bladedr/v0.9.5/docs/compose.example.yml
+  https://raw.githubusercontent.com/mar0ls/bladedr/v0.9.6/docs/compose.example.yml
 ```
 
 **2. Create `.env`**
 
 ```sh
-docker run --rm mar0ls/bladedr:0.9.5 -keygen
+docker run --rm mar0ls/bladedr:0.9.6 -keygen
 # BLADEDR_NODE_KEY=…   # private (node) — keep secret
 # public_key=…         # seals credentials
 
@@ -89,7 +89,7 @@ chmod 600 .env
 ```
 
 Prefer a template? [`.env.example`](.env.example) lists every setting with how to fill it
-in (`curl -fsSLo .env https://raw.githubusercontent.com/mar0ls/bladedr/v0.9.5/docs/.env.example`),
+in (`curl -fsSLo .env https://raw.githubusercontent.com/mar0ls/bladedr/v0.9.6/docs/.env.example`),
 and covers both compose files.
 
 Back up `BLADEDR_NODE_KEY` somewhere other than this machine **now**. It is the only
@@ -171,7 +171,7 @@ password.
 **2. Binaries**
 
 ```sh
-V=v0.9.5; ARCH=amd64     # or arm64 — the control plane's own architecture
+V=v0.9.6; ARCH=amd64     # or arm64 — the control plane's own architecture
 base=https://github.com/mar0ls/bladedr/releases/download/$V
 cd "$(mktemp -d)"
 for f in bladedr-server.linux-$ARCH bladectl.linux-$ARCH \
@@ -286,7 +286,7 @@ and forgets every credential on restart.
 
 ```sh
 bladedr-server -keygen                       # binary
-docker run --rm mar0ls/bladedr:0.9.5 -keygen # image
+docker run --rm mar0ls/bladedr:0.9.6 -keygen # image
 ```
 
 Sensor tokens need no such care: they're per-host, the server stores only digests, and
