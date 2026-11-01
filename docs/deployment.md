@@ -88,6 +88,10 @@ EOF
 chmod 600 .env
 ```
 
+Prefer a template? [`.env.example`](.env.example) lists every setting with how to fill it
+in (`curl -fsSLo .env https://raw.githubusercontent.com/mar0ls/bladedr/v0.9.5/docs/.env.example`),
+and covers both compose files.
+
 Back up `BLADEDR_NODE_KEY` somewhere other than this machine **now**. It is the only
 thing that decrypts the stored SSH credentials; see [Secrets](#secrets).
 

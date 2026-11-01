@@ -8,7 +8,7 @@
 # store. For those, bring a certificate from a real CA (put it in ./tls/ as tls.crt
 # and tls.key) or use compose.example.yml behind a proxy.
 #
-# Put a .env file next to this one:
+# Put a .env file next to this one (docs/.env.example is a template):
 #   BLADEDR_NODE_KEY=…           # docker run --rm mar0ls/bladedr:0.9.5 -keygen
 #   POSTGRES_PASSWORD=…          # openssl rand -hex 24
 #   BLADEDR_ADMIN_PASSWORD=…     # initial admin password

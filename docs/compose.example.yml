@@ -1,7 +1,8 @@
 # A complete bladedr stack from the published image: control plane + database.
 # Step-by-step walkthrough: docs/deployment.md.
 #
-# Copy this file into an empty directory, put a .env file next to it and bring it up:
+# Copy this file into an empty directory, put a .env file next to it (docs/.env.example
+# is a template) and bring it up:
 #
 #   docker run --rm mar0ls/bladedr:0.9.5 -keygen   # prints BLADEDR_NODE_KEY=…
 #   cat > .env <<EOF
