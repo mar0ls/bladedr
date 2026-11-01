@@ -177,7 +177,10 @@ outside the image:
 [docs/compose.example.yml](docs/compose.example.yml) is a complete stack — control plane
 plus database — with the node key and database password required rather than defaulted,
 so it refuses to start half-configured instead of coming up with an example password
-guarding your sealed SSH credentials.
+guarding your sealed SSH credentials. It serves plaintext HTTP on loopback, for use
+behind a reverse proxy. [docs/compose.tls.example.yml](docs/compose.tls.example.yml) is
+the same stack with bladedr serving HTTPS itself, using a self-signed certificate it
+generates on first start.
 
 Pin the version. `latest` moves on the next release, and this is the component holding
 SSH access to your fleet.

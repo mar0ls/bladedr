@@ -121,11 +121,37 @@ Continue with [First steps after install](#first-steps-after-install).
   add `- ./policies:/etc/bladedr/policies:ro` under the server's `volumes:`, set
   `BLADEDR_SERVER_URL` in `.env`, and `docker compose up -d`. The server reads the
   bundle at startup, so restart it after changing policies.
-- **TLS on the container:** see the commented lines in `compose.yml`. Key and
-  certificate must be readable by uid 10001, and the image's healthcheck must be
-  swapped for the HTTPS one shown there.
+- **TLS on the container:** use [compose.tls.example.yml](compose.tls.example.yml)
+  instead, see [the next section](#variant-https-in-the-container-self-signed-certificate).
+  Doing it by hand on top of `compose.yml` means the key must be readable by uid 10001
+  and the image's plaintext healthcheck must be replaced with an HTTPS one.
 - **Other settings** (scan workers, retention, …): add them to the server's
   `environment:`. The full list is in the README's [Config](../README.md#config) table.
+
+### Variant: HTTPS in the container, self-signed certificate
+
+[compose.tls.example.yml](compose.tls.example.yml) is the same stack with bladedr
+serving HTTPS itself, so there is no proxy to set up. A one-shot `tls-init` service
+generates a self-signed certificate into `./tls/` on first start and leaves it alone
+afterwards. Use it the same way as above, with these differences:
+
+- `.env` also needs `BLADEDR_ADMIN_PASSWORD` (this file requires it rather than
+  generating one) and, for a certificate that matches how you reach the server,
+  `TLS_DNS` and/or `TLS_IP`. Without them the certificate is issued for `localhost` /
+  `127.0.0.1` only.
+- The console is `https://<TLS_DNS or TLS_IP>:8389/ui` — host port **8389**, not 8080.
+  It binds to loopback unless you set `BLADEDR_BIND_ADDRESS=0.0.0.0`; if you do,
+  restrict access with a firewall, because Docker publishes ports ahead of the host
+  firewall's rules.
+- The certificate is valid for 365 days. To renew or change it, stop the stack, delete
+  `./tls`, adjust `TLS_DNS`/`TLS_IP` and start again.
+- **Self-signed means clients must be told to trust it.** Browsers ask once.
+  `bladectl` and the eBPF sensor verify the server certificate and have no option to
+  skip that, so they need `./tls/tls.crt` in the trust store of the machine they run
+  on (on Linux, Go also honours `SSL_CERT_FILE`). If you plan to use the sensor tier
+  on several hosts, a certificate from a real CA — dropped into `./tls/` as `tls.crt`
+  and `tls.key`, readable by uid 10001 — saves that work; `tls-init` leaves existing
+  files untouched.
 
 ## Option B: release binaries + systemd
 

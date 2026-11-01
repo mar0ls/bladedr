@@ -55,6 +55,11 @@ Then open `http://127.0.0.1:8080/ui`, sign in as `admin` and set a new password.
 compose file publishes the console on loopback only, because it serves plaintext HTTP.
 Put a TLS reverse proxy in front of it, or set `BLADEDR_TLS_CERT`/`BLADEDR_TLS_KEY`.
 
+Prefer HTTPS straight from the container? Use
+[`docs/compose.tls.example.yml`](https://github.com/mar0ls/bladedr/blob/v0.9.5/docs/compose.tls.example.yml)
+instead: it generates a self-signed certificate on first start and serves the console on
+`https://<host>:8389/ui`.
+
 **Back up `BLADEDR_NODE_KEY` separately from the database.** It is the only key that
 decrypts the stored SSH credentials. If you lose it, the credentials cannot be recovered.
 
